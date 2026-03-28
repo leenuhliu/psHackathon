@@ -467,7 +467,7 @@ Respond with ONLY valid JSON:
 
     const veoOp0 = await Promise.race([
       ai.models.generateVideos({
-        model: 'veo-2.0-generate-001',
+        model: 'veo-3.1-fast-generate-preview',
         prompt: introData.veo_prompt,
         config: { aspectRatio: '16:9', durationSeconds: 6 },
       }),
@@ -683,7 +683,7 @@ Respond with ONLY valid JSON: { "veo_prompt": "..."${scene_number === 1 ? ', "vi
       setTimeout(() => reject(new Error('Veo submit timed out after 60s — the API may be overloaded. Please try again.')), 60_000)
     );
     const veoParams = {
-      model: 'veo-2.0-generate-001',
+      model: 'veo-3.1-fast-generate-preview',
       prompt: finalVeoPrompt,
       config: { aspectRatio: '16:9', durationSeconds: 6 },
     };
