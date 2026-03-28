@@ -3,7 +3,12 @@ import { randomUUID } from 'crypto';
 import { setDefaultResultOrder } from 'dns';
 setDefaultResultOrder('ipv4first');
 import { createServer } from 'http';
-import { mkdirSync, writeFileSync } from 'fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'fs';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+const ffmpeg = require('fluent-ffmpeg');
+ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
@@ -62,6 +67,7 @@ async function initDb() {
   await sql`
     CREATE UNIQUE INDEX IF NOT EXISTS world_state_show_key ON world_state(show_id, key)
   `;
+  await sql`ALTER TABLE episodes ADD COLUMN IF NOT EXISTS veo_prompt text`;
   console.log('DB ready');
 }
 
@@ -398,9 +404,24 @@ setInterval(() => {
 async function runScenePipeline(jobId, params) {
   const { show_id, scene_number, solution, challenge_text, story_name, parent_approved, voice_response, character_traits } = params;
   const t0 = Date.now();
+  // Step order — a background log (e.g. lyria_done) won't overwrite a later step
+  const STEP_ORDER = ['loading_context','building_prompts','lyria_starting','awaiting_voice',
+    'lyria_done','starting_veo','veo_queued','veo_polling','veo_done','saving','saving_db'];
   const log = (step, label, extra = {}) => {
     const elapsed_ms = Date.now() - t0;
-    jobs.set(jobId, { status: 'running', step, label, elapsed_ms, started_at: jobs.get(jobId)?.started_at ?? t0, ...extra });
+    const current = jobs.get(jobId);
+    const currentIdx = STEP_ORDER.indexOf(current?.step ?? '');
+    const newIdx = STEP_ORDER.indexOf(step);
+    if (newIdx >= 0 && currentIdx > newIdx) {
+      // Background step firing late — just print to console, don't overwrite UI status
+      console.log(`[job:${jobId.slice(0,8)}] +${elapsed_ms}ms  ${step} (suppressed, already at ${current.step}): ${label}`);
+      return;
+    }
+    // Preserve voice-barrier callbacks so Lyria's async log() doesn't destroy them
+    const voiceFields = {};
+    if (current?.resolveVoice) voiceFields.resolveVoice = current.resolveVoice;
+    if (Object.prototype.hasOwnProperty.call(current ?? {}, 'pendingVoiceResponse')) voiceFields.pendingVoiceResponse = current.pendingVoiceResponse;
+    jobs.set(jobId, { status: 'running', step, label, elapsed_ms, started_at: current?.started_at ?? t0, ...voiceFields, ...extra });
     console.log(`[job:${jobId.slice(0,8)}] +${elapsed_ms}ms  ${step}: ${label}`);
   };
 
@@ -421,9 +442,10 @@ async function runScenePipeline(jobId, params) {
     }
 
     log('loading_context', 'Loading story context...');
-    const [existingCharacters, prevEpisodes] = await Promise.all([
+    const [existingCharacters, prevEpisodes, visualStyleRows] = await Promise.all([
       sql`SELECT name, description, styled_frame_url FROM characters WHERE show_id = ${show_id}`,
-      sql`SELECT episode_number, title, story_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`
+      sql`SELECT episode_number, title, story_prompt, veo_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`,
+      sql`SELECT value FROM world_state WHERE show_id = ${show_id} AND key = 'visual_style'`
     ]);
     const characterContext = existingCharacters.length
       ? `Characters in this story: ${existingCharacters.map(c => `${c.name} (${c.description})`).join(', ')}.`
@@ -435,10 +457,46 @@ async function runScenePipeline(jobId, params) {
       ? `Previous scenes: ${prevEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ')}`
       : 'This is the first scene.';
 
+    // Visual continuity: pass previous veo_prompts so Gemini can match style exactly
+    const prevVeoContext = prevEpisodes.filter(e => e.veo_prompt).length
+      ? `Previous scenes' animation prompts (match their visual style, art style, color palette, and world setting exactly):\n${prevEpisodes.filter(e => e.veo_prompt).map(e => `Scene ${e.episode_number}: ${e.veo_prompt}`).join('\n')}`
+      : '';
+    const establishedVisualStyle = visualStyleRows[0]?.value ?? null;
+    const visualStyleContext = establishedVisualStyle
+      ? `Established visual style for ALL scenes in this story (use exactly): ${JSON.stringify(establishedVisualStyle)}`
+      : '';
+
+    // Character reference image for Veo (main character's styled art)
+    const mainChar = existingCharacters[0];
+    let charImageBytes = null;
+    let charImageMime = 'image/png';
+    if (mainChar?.styled_frame_url) {
+      try {
+        const imgPath = join(__dirname, 'public', mainChar.styled_frame_url);
+        const imgBuf = readFileSync(imgPath);
+        charImageBytes = imgBuf.toString('base64');
+        if (mainChar.styled_frame_url.endsWith('.jpg') || mainChar.styled_frame_url.endsWith('.jpeg')) charImageMime = 'image/jpeg';
+      } catch (_) { charImageBytes = null; }
+    }
+
     log('building_prompts', 'Writing scene script...');
     const challengeContext = challenge_text
       ? `The challenge the child was given: "${challenge_text}"\nThe child's creative solution: "${solution}"`
       : `The child's idea for the scene: "${solution}"`;
+
+    const curtainInstruction = `CURTAIN RULE (STRICTLY FOLLOW FOR EVERY SCENE):
+- The very FIRST frame of the animation: red velvet theatrical curtains are CLOSED, covering the entire screen. Then they smoothly open outward from the center over exactly 1 second, revealing the scene behind them.
+- The very LAST half-second: the same red velvet theatrical curtains snap shut quickly from both sides, ending frozen on closed curtains with the exact two-word text 'Scene End' (S-C-E-N-E space E-N-D) in a warm storybook font. The text must spell exactly 'Scene End'.`;
+
+    const continuityInstruction = scene_number > 1 && (prevVeoContext || visualStyleContext) ? `
+VISUAL CONTINUITY (CRITICAL — this story must look like one cohesive animated film):
+${visualStyleContext}
+${prevVeoContext}
+You MUST write the veo_prompt so that the art style, color palette, character appearance, and world setting are IDENTICAL to the previous scenes above. Do not introduce new visual styles or settings that contradict what was already established.` : '';
+
+    const visualStyleInstruction = scene_number === 1 ? `
+Since this is scene 1, you must also define the visual style that will be used for ALL 3 scenes. Include a "visual_style" field in your JSON with a brief description of the art style, color palette, and world setting that will be consistent across all scenes.` : '';
+
     const result = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
@@ -454,18 +512,30 @@ This is scene ${scene_number} of 3. The child's solution must be shown WORKING �
 IMPORTANT: Refer to the main character by their name throughout (e.g. "Blobby jumps over the rock" not "they jump over the rock"). Never use gendered pronouns (he/she/him/her). For unnamed supporting characters use "they/them".
 
 ${CHILD_VOCAB}
+${continuityInstruction}
+${curtainInstruction}
+${visualStyleInstruction}
 
 Respond with ONLY valid JSON:
 {
-  "veo_prompt": "Detailed cinematic scene description for Veo 3. Richly colored hand-drawn animation style with vibrant fully-painted backgrounds, warm and slow-paced, 8 seconds. Show the child's solution working triumphantly. Include the character visually. In the very last half-second, red velvet theatrical curtains snap shut quickly from both sides, ending frozen on closed curtains with 'Scene End' in a warm storybook font — this must be the very last frame.",
+  "veo_prompt": "Detailed cinematic scene description for Veo 3. Richly colored hand-drawn animation style with vibrant fully-painted backgrounds, warm and slow-paced, 8 seconds. START with curtains closed then opening. Show the child's solution working triumphantly. Include the character visually. END with curtains closing and 'Scene End' text.",
   "lyria_prompt": "Music prompt for Lyria. Warm, gentle, children's animated tone that matches the emotional beat of the solution succeeding.",
   "episode_title": "Short fun title for this scene",
   "story_prompt_summary": "One sentence describing what happened (for story continuity context in future scenes)",
-  "closing_line": ${scene_number >= 3 ? '"The End! What a [pick ONE vivid adjective perfectly matching the mood and events of this specific story — e.g. magical, daring, silly, heartwarming, adventurous] story!"' : 'null'}
+  "closing_line": ${scene_number >= 3 ? '"The End! What a [pick ONE vivid adjective perfectly matching the mood and events of this specific story — e.g. magical, daring, silly, heartwarming, adventurous] story!"' : 'null'}${scene_number === 1 ? ',\n  "visual_style": "Brief description of the art style, color palette, and world setting established in this scene"' : ''}
 }` }] }],
       config: { responseMimeType: 'application/json' }
     });
     const prompts = JSON.parse(result.text);
+
+    // Scene 1: save the visual style so scenes 2+3 inherit it
+    if (scene_number === 1 && prompts.visual_style) {
+      sql`
+        INSERT INTO world_state (show_id, key, value, last_updated)
+        VALUES (${show_id}, 'visual_style', ${JSON.stringify(prompts.visual_style)}, now())
+        ON CONFLICT (show_id, key) DO UPDATE SET value = EXCLUDED.value, last_updated = now()
+      `.catch(e => console.warn('Failed to save visual_style:', e.message));
+    }
 
     // Start Lyria immediately — we have the prompt and don't need voice_response for music
     log('lyria_starting', 'Starting Lyria music in background...');
@@ -495,11 +565,22 @@ Respond with ONLY valid JSON:
       : prompts.veo_prompt;
 
     log('starting_veo', 'Starting Veo video generation...');
-    const veoOp0 = await ai.models.generateVideos({
-      model: 'veo-3.1-fast-generate-001',
+    const veoSubmitTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Veo submit timed out after 60s — the API may be overloaded. Please try again.')), 60_000)
+    );
+    const veoParams = {
+      model: 'veo-3.1-fast-generate-preview',
       prompt: finalVeoPrompt,
       config: { aspectRatio: '16:9', durationSeconds: 8 },
-    });
+    };
+    // Pass character's styled art as reference image — anchors visual character appearance
+    if (charImageBytes) {
+      veoParams.image = { imageBytes: charImageBytes, mimeType: charImageMime };
+    }
+    const veoOp0 = await Promise.race([
+      ai.models.generateVideos(veoParams),
+      veoSubmitTimeout,
+    ]);
     log('veo_queued', 'Veo job submitted, waiting for generation...', { veo_poll: 0 });
 
     // Poll Veo — 10s interval, 8-minute hard timeout
@@ -541,8 +622,8 @@ Respond with ONLY valid JSON:
 
     log('saving_db', 'Saving to database...');
     await sql`
-      INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url)
-      VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${prompts.story_prompt_summary || solution}, ${video_url}, ${audio_url})
+      INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url, veo_prompt)
+      VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${prompts.story_prompt_summary || solution}, ${video_url}, ${audio_url}, ${prompts.veo_prompt})
       ON CONFLICT DO NOTHING
     `;
 
@@ -603,6 +684,36 @@ app.post('/api/scene-voice-response/:jobId', (req, res) => {
   }
   res.json({ ok: true });
 });
+
+// Concatenate all 3 scene videos into one 24-second mp4 for export
+app.get('/api/export-story/:showId', async (req, res, next) => { try {
+  const { showId } = req.params;
+  const episodes = await sql`
+    SELECT episode_number, veo_clip_url FROM episodes
+    WHERE show_id = ${showId} ORDER BY episode_number ASC
+  `;
+  if (!episodes.length) return res.status(404).json({ error: 'No scenes found' });
+
+  const clipPaths = episodes.map(e => {
+    const p = join(__dirname, 'public', e.veo_clip_url);
+    if (!existsSync(p)) throw new Error(`Scene ${e.episode_number} video file not found`);
+    return p;
+  });
+
+  const outputFilename = `${showId}-full-story.mp4`;
+  const outputPath = join(__dirname, 'public', 'generated', outputFilename);
+
+  await new Promise((resolve, reject) => {
+    let cmd = ffmpeg();
+    clipPaths.forEach(p => cmd.input(p));
+    cmd
+      .on('error', reject)
+      .on('end', resolve)
+      .mergeToFile(outputPath, join(__dirname, 'public', 'generated'));
+  });
+
+  res.json({ url: `/generated/${outputFilename}` });
+} catch (e) { next(e); } });
 
 // Return JSON for any unhandled errors instead of Express HTML
 app.use((err, req, res, next) => {

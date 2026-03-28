@@ -151,9 +151,9 @@
     </div>
     <canvas id="draw-canvas-2" width="580" height="260"></canvas>
     <br><br>
-    <button onclick="submitLoadingCharacter()" id="btn-add-loading">Add to Next Scene</button>
-    <div class="status" id="loading-char-status"></div>
-    <img class="styled" id="styled-img-2" style="display:none" />
+    <button onclick="submitLoadingCharacter()" id="btn-add-loading" style="font-size:1.1rem;padding:10px 28px;">✓ Done</button>
+    <!-- Submitted characters appear here while they generate -->
+    <div id="loading-chars-list" style="margin-top:14px;display:flex;flex-wrap:wrap;gap:12px;"></div>
   </div>
 
   <!-- Scene result -->
@@ -479,21 +479,25 @@
   }
 
   async function exportStory(showId, storyName) {
+    const btn = event.target;
+    const origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳ Stitching...';
     try {
-      const res = await fetch(`/api/show-bible?show_id=${showId}`);
+      const res = await fetch(`/api/export-story/${showId}`);
       const data = await res.json();
-      if (!data.episodes.length) { alert('No scenes to export yet.'); return; }
-      // Open each video clip in a new tab for download
-      data.episodes.forEach((ep, i) => {
-        const a = document.createElement('a');
-        a.href = ep.veo_clip_url;
-        a.download = `${storyName || 'story'}-scene-${ep.episode_number}.mp4`;
-        a.target = '_blank';
-        document.body.appendChild(a);
-        setTimeout(() => { a.click(); document.body.removeChild(a); }, i * 500);
-      });
+      if (data.error) throw new Error(data.error);
+      const a = document.createElement('a');
+      a.href = data.url;
+      a.download = `${storyName || 'story'}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
     } catch (err) {
       alert('Export failed: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = origText;
     }
   }
 
@@ -649,57 +653,58 @@
 
     capturedVoiceResponse = null;
 
-    // Start job immediately — generate-scene returns a job_id instantly
-    const startRes = await fetch('/api/generate-scene', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        show_id: showId, scene_number: currentScene, solution,
-        challenge_text: currentChallenge?.challenge_text || '',
-        story_name: answers.storyName,
-        parent_approved, character_traits: characterTraits
-      })
-    });
-    const { job_id, error: startErr } = await startRes.json();
-    if (startErr) throw new Error(startErr);
-
-    // Start polling immediately — status display updates live from here
-    const resultPromise = pollSceneJob(job_id, status);
-
-    // Fetch voice prompt with a hard 8s timeout, then show voice moment
-    // with a 25s auto-skip — so Veo is ALWAYS unblocked no matter what.
     try {
-      const vpAbort = new AbortController();
-      const vpTimer = setTimeout(() => vpAbort.abort(), 8000);
-      const vpRes = await fetch('/api/scene-voice-prompt', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, user_input: solution }),
-        signal: vpAbort.signal
+      // Start job immediately — generate-scene returns a job_id instantly
+      const startRes = await fetch('/api/generate-scene', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          show_id: showId, scene_number: currentScene, solution,
+          challenge_text: currentChallenge?.challenge_text || '',
+          story_name: answers.storyName,
+          parent_approved, character_traits: characterTraits
+        })
       });
-      clearTimeout(vpTimer);
-      const vpData = await vpRes.json();
-      if (vpData.voice_prompt) {
-        // Race: child responds OR 25s passes — either way we move on
-        capturedVoiceResponse = await Promise.race([
-          showVoiceMoment(vpData.voice_prompt),
-          new Promise(r => setTimeout(() => r(null), 25000))
-        ]);
-      }
-    } catch (_) {}
+      const { job_id, error: startErr } = await startRes.json();
+      if (startErr) throw new Error(startErr);
 
-    // Always deliver voice response — unblocks Veo whether child responded or not
-    fetch(`/api/scene-voice-response/${job_id}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ voice_response: capturedVoiceResponse })
-    }).catch(() => {});
+      // Start polling immediately — status display updates live from here
+      const resultPromise = pollSceneJob(job_id, status);
 
-    document.getElementById('voice-moment').style.display = 'none';
-    hideSolutionInput();
-    document.getElementById('challenge-box').style.display = 'none';
-    document.getElementById('loading-draw-area').style.display = 'block';
+      // Fetch voice prompt with a hard 8s timeout, then show voice moment
+      // with a 25s auto-skip — so Veo is ALWAYS unblocked no matter what.
+      try {
+        const vpAbort = new AbortController();
+        const vpTimer = setTimeout(() => vpAbort.abort(), 8000);
+        const vpRes = await fetch('/api/scene-voice-prompt', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ show_id: showId, user_input: solution }),
+          signal: vpAbort.signal
+        });
+        clearTimeout(vpTimer);
+        const vpData = await vpRes.json();
+        if (vpData.voice_prompt) {
+          capturedVoiceResponse = await Promise.race([
+            showVoiceMoment(vpData.voice_prompt),
+            new Promise(r => setTimeout(() => r(null), 25000))
+          ]);
+        }
+      } catch (_) {}
 
-    try {
-      // Await the already-running poll
+      // Always deliver voice response — unblocks Veo whether child responded or not
+      fetch(`/api/scene-voice-response/${job_id}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ voice_response: capturedVoiceResponse })
+      }).catch(() => {});
+
+      document.getElementById('voice-moment').style.display = 'none';
+      hideSolutionInput();
+      document.getElementById('challenge-box').style.display = 'none';
+      document.getElementById('loading-draw-area').style.display = 'block';
+      document.getElementById('loading-chars-list').innerHTML = '';
+      document.getElementById('loading-char-name').value = '';
+      clearCanvas2();
+
       const data = await resultPromise;
 
       if (data.needs_approval) {
@@ -802,11 +807,39 @@
   }
 
   // ── Loading-time draw ────────────────────────────────────────────────────
-  async function submitLoadingCharacter() {
+  function submitLoadingCharacter() {
     const name = document.getElementById('loading-char-name').value.trim();
     if (!name) return alert('Name your character/object');
-    await addCharacter(name, canvas2, 'btn-add-loading', 'loading-char-status', 'styled-img-2', null);
-    document.getElementById('loading-char-status').textContent = `✓ ${name} will appear in the next scene!`;
+
+    // Snapshot the drawing before clearing
+    const imageData = canvas2.toDataURL('image/png');
+
+    // Clear canvas and name immediately so they can draw another
+    clearCanvas2();
+    document.getElementById('loading-char-name').value = '';
+
+    // Add a pending card to the list
+    const list = document.getElementById('loading-chars-list');
+    const card = document.createElement('div');
+    card.style.cssText = 'text-align:center;font-size:12px;color:#555;width:100px;';
+    card.innerHTML = `<span class="loader"></span><br><strong>${name}</strong><br><span style="color:#aaa">styling...</span>`;
+    list.appendChild(card);
+
+    // Generate in background — update card when done
+    fetch('/api/add-character', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ show_id: showId, name, image_data: imageData })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      characters.push({ name, styled_frame_url: data.styled_frame_url });
+      card.innerHTML = `<img src="${data.styled_frame_url}" style="width:90px;height:70px;object-fit:cover;border-radius:4px;display:block;margin:0 auto 4px;"><strong>${name}</strong><br><span style="color:#4a4">✓ added!</span>`;
+    })
+    .catch(e => {
+      card.innerHTML = `<span style="color:#c00">✗ ${name}<br>${e.message}</span>`;
+    });
   }
 
   // ── Shared character add ─────────────────────────────────────────────────
