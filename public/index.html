@@ -92,6 +92,7 @@
   <div id="scene-result" style="display:none;">
     <h4 id="scene-title" style="margin:8px 0;"></h4>
     <video id="scene-video" controls></video>
+    <audio id="scene-audio" controls style="width:100%;margin-top:4px;"></audio>
     <div id="scene-next-hint" style="font-size:13px;color:#555;margin:4px 0;font-style:italic;"></div>
   </div>
 </div>
@@ -174,6 +175,7 @@
     const btn = document.getElementById('btn-generate');
     const status = document.getElementById('scene-status');
     btn.disabled = true;
+    stopLyria();
     document.getElementById('scene-result').style.display = 'none';
     document.getElementById('loading-draw-area').style.display = 'block';
     status.innerHTML = `<span class="loader"></span>Generating scene ${currentScene} with Veo (~1 min)...`;
@@ -190,7 +192,7 @@
       scenes.push(data);
       document.getElementById('loading-draw-area').style.display = 'none';
       document.getElementById('scene-title').textContent = data.episode_title;
-      document.getElementById('scene-video').src = data.video_url;
+      syncAudioToVideo(data.video_url, data.audio_url);
       document.getElementById('scene-next-hint').textContent = data.next_prompt || '';
       document.getElementById('scene-result').style.display = 'block';
       status.textContent = `✓ Scene ${currentScene} ready!`;
@@ -204,10 +206,12 @@
           const hint = document.getElementById('next-prompt-display');
           hint.textContent = `💬 ${data.next_prompt}`;
           hint.style.display = 'block';
+          narrate(data.next_prompt);
         }
         btn.disabled = false;
       } else {
         status.textContent = '✓ All scenes done!';
+        if (data.next_prompt) narrate(data.next_prompt);
         showFinale();
       }
     } catch (e) {
@@ -260,6 +264,7 @@
       <div class="scene-card">
         <h4>Scene ${i + 1}: ${s.episode_title}</h4>
         <video src="${s.video_url}" controls></video>
+        <audio src="${s.audio_url}" controls style="width:100%;margin-top:4px;"></audio>
       </div>
     `).join('');
     show('screen-finale');
@@ -289,6 +294,45 @@
     recognition.start();
     btn.textContent = '⏹ Stop';
     indicator.textContent = '● recording';
+  }
+
+  // ── Video + Lyria audio sync ─────────────────────────────────────────────
+  let currentLyriaAudio = null;
+
+  function syncAudioToVideo(videoUrl, audioUrl) {
+    const video = document.getElementById('scene-video');
+    const audio = document.getElementById('scene-audio');
+    const newVideo = video.cloneNode(false);
+    const newAudio = audio.cloneNode(false);
+    video.replaceWith(newVideo); audio.replaceWith(newAudio);
+    newVideo.src = videoUrl;
+    newAudio.src = audioUrl;
+    newAudio.loop = true;
+    currentLyriaAudio = newAudio;
+    newVideo.addEventListener('play', () => { newAudio.currentTime = newVideo.currentTime % newAudio.duration || 0; newAudio.play(); });
+    newVideo.addEventListener('pause', () => newAudio.pause());
+    newVideo.addEventListener('seeked', () => { newAudio.currentTime = newVideo.currentTime % newAudio.duration || 0; });
+  }
+
+  function stopLyria() {
+    if (currentLyriaAudio) { currentLyriaAudio.pause(); currentLyriaAudio.loop = false; }
+  }
+
+  // ── Narrator (Gemini TTS) ────────────────────────────────────────────────
+  let narratorAudio = null;
+  async function narrate(text) {
+    try {
+      if (narratorAudio) { narratorAudio.pause(); narratorAudio = null; }
+      const res = await fetch('/api/narrate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text })
+      });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      narratorAudio = new Audio(URL.createObjectURL(blob));
+      narratorAudio.play();
+    } catch (_) {}
   }
 
   // ── Utility ──────────────────────────────────────────────────────────────

@@ -9,7 +9,6 @@ import express from 'express';
 import cors from 'cors';
 import { WebSocketServer } from 'ws';
 import { GoogleGenAI } from '@google/genai';
-import Replicate from 'replicate';
 import sql from './db.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -20,8 +19,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-const replicate = new Replicate({ auth: process.env.REPLICATE_API_TOKEN });
-const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY });
 
 // Create/migrate tables on startup
 async function initDb() {
@@ -169,7 +167,7 @@ app.post('/api/orchestrate', async (req, res) => {
 
   // Use Gemini Flash to parse creative intent from transcript
   const result = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-2.5-flash',
     contents: [{
       role: 'user',
       parts: [{ text: `You are a pipeline assistant for a children's animated show generator.
@@ -212,33 +210,30 @@ app.post('/api/add-character', async (req, res, next) => {
       return res.status(400).json({ error: 'show_id, name, and image_data required' });
     }
 
-    // Save doodle to disk so Replicate can fetch it via URL
+    // Save doodle to disk
     const doodleFilename = `${show_id}-doodle-${Date.now()}.png`;
     const doodlePath = join(__dirname, 'public', 'generated', doodleFilename);
     const base64Data = image_data.replace(/^data:image\/\w+;base64,/, '');
     writeFileSync(doodlePath, base64Data, 'base64');
-    const doodle_url = `${req.protocol}://${req.get('host')}/generated/${doodleFilename}`;
+    const doodle_url = `/generated/${doodleFilename}`;
 
-    // Style the doodle with ControlNet
-    const output = await replicate.run(
-      'jagilley/controlnet-scribble:435061a1b5a4c1e26740464bf786efdfa9cb3a3ac488595a2de23e143fdb0117',
-      {
-        input: {
-          image: doodle_url,
-          prompt: `hand-drawn cartoon character named ${name}, clean line art, flat color, sticker style, white background, children's animation`,
-          num_samples: '1',
-          image_resolution: '512',
-          ddim_steps: 20,
-          scale: 9,
-          eta: 0,
-        }
-      }
-    );
-    const styled_frame_url = Array.isArray(output) ? output[0] : output;
+    // Style the doodle with Gemini image generation (Nano Banana)
+    const styleResult = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [{ role: 'user', parts: [
+        { inlineData: { mimeType: 'image/png', data: base64Data } },
+        { text: `This is a child's drawing of a character named "${name}". Create a colorful cartoon sticker illustration that is COMPLETELY FAITHFUL to this drawing. Preserve every quirky proportion exactly — if the eyes are lopsided keep them lopsided, if the head is huge keep it huge, if limbs are uneven keep them uneven. White background. Children's animation style. Do NOT correct or normalize any proportions.` }
+      ]}],
+      config: { responseModalities: ['IMAGE', 'TEXT'] }
+    });
+    const imagePart = styleResult.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('image'));
+    const styledFilename = `${show_id}-styled-${Date.now()}.png`;
+    writeFileSync(join(__dirname, 'public', 'generated', styledFilename), Buffer.from(imagePart.inlineData.data, 'base64'));
+    const styled_frame_url = `/generated/${styledFilename}`;
 
     // Use Gemini Vision to describe the styled character for use in future Veo prompts
     const visionResult = await ai.models.generateContent({
-      model: 'gemini-2.0-flash',
+      model: 'gemini-2.5-flash',
       contents: [{
         role: 'user',
         parts: [
@@ -259,6 +254,40 @@ app.post('/api/add-character', async (req, res, next) => {
     res.json({ character, styled_frame_url, description });
   } catch (e) { next(e); }
 });
+
+// Convert raw PCM L16 to WAV buffer so browsers can play it
+function pcmToWav(pcmBuffer, sampleRate = 24000, channels = 1, bitsPerSample = 16) {
+  const dataSize = pcmBuffer.length;
+  const wav = Buffer.alloc(44 + dataSize);
+  wav.write('RIFF', 0); wav.writeUInt32LE(36 + dataSize, 4); wav.write('WAVE', 8);
+  wav.write('fmt ', 12); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20);
+  wav.writeUInt16LE(channels, 22); wav.writeUInt32LE(sampleRate, 24);
+  wav.writeUInt32LE(sampleRate * channels * bitsPerSample / 8, 28);
+  wav.writeUInt16LE(channels * bitsPerSample / 8, 32); wav.writeUInt16LE(bitsPerSample, 34);
+  wav.write('data', 36); wav.writeUInt32LE(dataSize, 40);
+  pcmBuffer.copy(wav, 44);
+  return wav;
+}
+
+// TTS narrator — returns a WAV audio stream
+app.post('/api/narrate', async (req, res, next) => { try {
+  const { text } = req.body;
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash-preview-tts',
+    contents: [{ role: 'user', parts: [{ text }] }],
+    config: {
+      responseModalities: ['AUDIO'],
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Sulafat' } } }
+    }
+  });
+  const part = result.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('audio'));
+  if (!part) return res.status(500).json({ error: 'No audio returned' });
+  const pcm = Buffer.from(part.inlineData.data, 'base64');
+  const wav = pcmToWav(pcm);
+  res.set('Content-Type', 'audio/wav');
+  res.send(wav);
+} catch (e) { next(e); } });
 
 // Core pipeline: user input → Gemini prompts → Veo video
 app.post('/api/generate-scene', async (req, res, next) => { try {
@@ -284,7 +313,7 @@ app.post('/api/generate-scene', async (req, res, next) => { try {
 
   // Ask Gemini to build the scene prompt + next guidance
   const result = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
+    model: 'gemini-2.5-flash',
     contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
 ${characterContext}
 ${storyHistory}
@@ -303,28 +332,44 @@ This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
 
   const prompts = JSON.parse(result.text);
 
-  // Generate video with Veo
-  let operation = await ai.models.generateVideos({
-    model: 'veo-3.0-fast-generate-001',
-    prompt: prompts.veo_prompt,
-    config: { aspectRatio: '16:9', durationSeconds: 8 },
-  });
-  while (!operation.done) {
+  // Generate Veo video + Lyria music in parallel
+  const [operation, lyriaRes] = await Promise.all([
+    ai.models.generateVideos({
+      model: 'veo-3.0-fast-generate-001',
+      prompt: prompts.veo_prompt,
+      config: { aspectRatio: '16:9', durationSeconds: 8 },
+    }),
+    ai.models.generateContent({
+      model: 'lyria-3-clip-preview',
+      contents: [{ role: 'user', parts: [{ text: prompts.lyria_prompt }] }],
+      config: { responseModalities: ['AUDIO'] },
+    }),
+  ]);
+
+  // Poll Veo until done
+  let veoOp = operation;
+  while (!veoOp.done) {
     await new Promise(r => setTimeout(r, 5000));
-    operation = await ai.operations.getVideosOperation({ operation });
+    veoOp = await ai.operations.getVideosOperation({ operation: veoOp });
   }
 
+  // Save Veo video
   const filename = `${show_id}-scene-${scene_number}.mp4`;
   const downloadPath = join(__dirname, 'public', 'generated', filename);
-  const video = operation.response.generatedVideos[0];
+  const video = veoOp.response.generatedVideos[0];
   await ai.files.download({ file: video.video, downloadPath });
-
   const video_url = `/generated/${filename}`;
+
+  // Save Lyria audio
+  const audioPart = lyriaRes.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('audio'));
+  const audioFilename = `${show_id}-scene-${scene_number}.mp3`;
+  writeFileSync(join(__dirname, 'public', 'generated', audioFilename), Buffer.from(audioPart.inlineData.data, 'base64'));
+  const audio_url = `/generated/${audioFilename}`;
 
   // Save episode to DB
   const [episode] = await sql`
-    INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url)
-    VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${prompts.veo_prompt}, ${video_url})
+    INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url)
+    VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${prompts.veo_prompt}, ${video_url}, ${audio_url})
     ON CONFLICT DO NOTHING
     RETURNING *
   `;
@@ -337,7 +382,7 @@ This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
     DO UPDATE SET value = EXCLUDED.value, last_updated = now()
   `;
 
-  res.json({ video_url, episode_title: prompts.episode_title, next_prompt: prompts.next_prompt, lyria_prompt: prompts.lyria_prompt });
+  res.json({ video_url, audio_url, episode_title: prompts.episode_title, next_prompt: prompts.next_prompt });
 } catch (e) { next(e); } });
 
 // Return JSON for any unhandled errors instead of Express HTML
