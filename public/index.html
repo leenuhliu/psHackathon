@@ -2,188 +2,301 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Nano Banana — Live Voice</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Story Builder — Dev Test</title>
   <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body {
-      font-family: sans-serif;
-      background: #fffdf0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      gap: 24px;
-    }
-    h1 { font-size: 2rem; }
-    #btn {
-      padding: 18px 48px;
-      font-size: 1.2rem;
-      border-radius: 12px;
-      border: 3px solid #222;
-      background: #f4d03f;
-      cursor: pointer;
-      font-weight: bold;
-      transition: transform 0.1s;
-    }
-    #btn:active { transform: scale(0.96); }
-    #btn:disabled { opacity: 0.4; cursor: default; }
-    #btn.listening { background: #e74c3c; color: #fff; border-color: #e74c3c; }
-    #status { color: #666; font-size: 0.95rem; }
-    #orb {
-      width: 80px; height: 80px;
-      border-radius: 50%;
-      background: #ddd;
-      transition: background 0.2s, transform 0.2s;
-    }
-    #orb.active { background: #f4d03f; transform: scale(1.15); }
-    #orb.speaking { background: #2ecc71; transform: scale(1.25); }
+    body { font-family: monospace; max-width: 700px; margin: 40px auto; padding: 20px; background: #f5f5f5; }
+    h2 { margin-bottom: 8px; }
+    .screen { display: none; background: white; padding: 24px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #ddd; }
+    .screen.active { display: block; }
+    input, textarea { width: 100%; padding: 8px; margin: 6px 0 12px; font-family: monospace; font-size: 14px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+    button { padding: 10px 20px; font-family: monospace; font-size: 14px; cursor: pointer; border-radius: 4px; border: 1px solid #333; background: #fff; margin-right: 8px; margin-bottom: 4px; }
+    button.primary { background: #333; color: #fff; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    canvas { border: 2px solid #333; border-radius: 4px; cursor: crosshair; touch-action: none; display: block; }
+    .canvas-tools { margin: 8px 0; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .status { color: #666; font-size: 13px; margin: 8px 0; min-height: 20px; }
+    .status.error { color: #c00; }
+    video { width: 100%; border-radius: 4px; margin: 12px 0; }
+    img.styled { width: 200px; border-radius: 4px; margin: 8px 0; display: block; border: 1px solid #ddd; }
+    .scene-card { border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin: 8px 0; }
+    #show-id-display { font-size: 11px; color: #999; margin-top: 8px; }
+    .loader { display: inline-block; width: 14px; height: 14px; border: 2px solid #ccc; border-top-color: #333; border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .hint-box { background: #fffbe6; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; font-size: 14px; border-left: 3px solid #f4d03f; }
   </style>
 </head>
 <body>
-  <h1>🍌 Nano Banana Live</h1>
-  <div id="orb"></div>
-  <button id="btn">Start talking</button>
-  <div id="status">Disconnected</div>
 
-  <script>
-    const btn = document.getElementById('btn');
-    const status = document.getElementById('status');
-    const orb = document.getElementById('orb');
+<!-- SCREEN 1: Setup -->
+<div class="screen active" id="screen-setup">
+  <h2>🎬 New Story</h2>
+  <label>Story name</label>
+  <input id="story-name" type="text" placeholder="e.g. Blobby's Big Adventure" />
+  <button class="primary" onclick="startStory()">Start →</button>
+  <div id="show-id-display"></div>
+</div>
 
-    let ws, audioCtx, source, worklet, stream;
-    let audioQueue = [];
-    let isPlaying = false;
-    let playCtx;
+<!-- SCREEN 2: Draw a character -->
+<div class="screen" id="screen-draw">
+  <h2>🎨 Draw a Character</h2>
+  <label>Character name</label>
+  <input id="char-name" type="text" placeholder="e.g. Blobby" />
+  <div class="canvas-tools">
+    <label>Brush: <input type="range" id="brush-size" min="2" max="30" value="8" style="width:100px;margin:0 4px;"></label>
+    <button onclick="clearCanvas()">Clear</button>
+  </div>
+  <canvas id="draw-canvas" width="620" height="340"></canvas>
+  <br><br>
+  <button class="primary" onclick="submitCharacter()" id="btn-add-char">Add to Story →</button>
+  <button onclick="skipCharacter()">Skip</button>
+  <div class="status" id="char-status"></div>
+  <img class="styled" id="styled-img" style="display:none" />
+  <div id="char-description" style="font-size:13px;color:#555;margin:4px 0;font-style:italic;"></div>
+</div>
 
-    async function startSession() {
-      btn.disabled = true;
-      status.textContent = 'Connecting...';
+<!-- SCREEN 3: Scene loop -->
+<div class="screen" id="screen-scene">
+  <h2 id="scene-heading">Scene 1 of 3</h2>
 
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-      ws = new WebSocket(`${proto}://${location.host}/live`);
+  <div class="hint-box" id="next-prompt-display" style="display:none;"></div>
 
-      ws.onopen = async () => {
-        // AudioContext for capture at 16kHz
-        audioCtx = new AudioContext({ sampleRate: 16000 });
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true }
-        });
-        await audioCtx.audioWorklet.addModule('audio-processor.js');
-        source = audioCtx.createMediaStreamSource(stream);
-        worklet = new AudioWorkletNode(audioCtx, 'audio-processor');
-        source.connect(worklet);
+  <label>What happens in this scene?</label>
+  <textarea id="scene-input" rows="3" placeholder="e.g. Blobby wanders into an enchanted forest and finds a glowing mushroom"></textarea>
 
-        worklet.port.onmessage = (e) => {
-          if (ws.readyState !== WebSocket.OPEN) return;
-          const pcm = float32ToInt16(e.data);
-          ws.send(JSON.stringify({ type: 'audio', data: arrayBufferToBase64(pcm.buffer) }));
-        };
+  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+    <button class="primary" onclick="generateScene()" id="btn-generate">Generate Scene 1</button>
+    <button onclick="toggleVoice()" id="btn-voice">🎤 Voice</button>
+    <span id="voice-indicator" style="font-size:12px;color:#c00;"></span>
+  </div>
 
-        status.textContent = 'Listening...';
-        btn.textContent = 'Stop';
-        btn.className = 'listening';
-        btn.disabled = false;
-        orb.className = 'active';
-      };
+  <div class="status" id="scene-status"></div>
 
-      ws.onmessage = async (e) => {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'ready') {
-          status.textContent = 'Listening...';
-        } else if (msg.type === 'audio') {
-          audioQueue.push(msg.data);
-          if (!isPlaying) playNext();
-        } else if (msg.type === 'error') {
-          status.textContent = `Error: ${msg.message}`;
-          stopSession();
-        }
-      };
+  <!-- Draw while Veo loads -->
+  <div id="loading-draw-area" style="display:none;border:1px dashed #ccc;padding:16px;border-radius:6px;margin:12px 0;">
+    <p style="font-size:13px;color:#555;margin-bottom:10px;">⏳ Generating your scene (~1 min)... <strong>Draw something to add to the next scene!</strong></p>
+    <label>Name this character/object</label>
+    <input id="loading-char-name" type="text" placeholder="e.g. Magic Mushroom" />
+    <div class="canvas-tools">
+      <label>Brush: <input type="range" id="brush-size-2" min="2" max="30" value="8" style="width:100px;margin:0 4px;"></label>
+      <button onclick="clearCanvas2()">Clear</button>
+    </div>
+    <canvas id="draw-canvas-2" width="580" height="260"></canvas>
+    <br><br>
+    <button onclick="submitLoadingCharacter()" id="btn-add-loading">Add to Next Scene</button>
+    <div class="status" id="loading-char-status"></div>
+    <img class="styled" id="styled-img-2" style="display:none" />
+  </div>
 
-      ws.onerror = () => {
-        status.textContent = 'Connection error';
-        stopSession();
-      };
+  <!-- Scene result -->
+  <div id="scene-result" style="display:none;">
+    <h4 id="scene-title" style="margin:8px 0;"></h4>
+    <video id="scene-video" controls></video>
+    <div id="scene-next-hint" style="font-size:13px;color:#555;margin:4px 0;font-style:italic;"></div>
+  </div>
+</div>
 
-      ws.onclose = () => {
-        if (status.textContent === 'Listening...') status.textContent = 'Disconnected';
-        resetUI();
-      };
-    }
+<!-- SCREEN 4: Finale -->
+<div class="screen" id="screen-finale">
+  <h2>🎉 Story Complete!</h2>
+  <div id="all-scenes"></div>
+  <button class="primary" onclick="location.reload()">Make Another Story</button>
+</div>
 
-    async function playNext() {
-      if (!audioQueue.length) {
-        isPlaying = false;
-        orb.className = 'active';
-        return;
-      }
-      isPlaying = true;
-      orb.className = 'speaking';
+<script>
+  // ── State ───────────────────────────────────────────────────────────────
+  let showId = null;
+  let currentScene = 1;
+  const TOTAL_SCENES = 3;
+  const scenes = [];
 
-      const b64 = audioQueue.shift();
-      const raw = base64ToArrayBuffer(b64);
-      const int16 = new Int16Array(raw);
-      const float32 = new Float32Array(int16.length);
-      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+  // ── Screen 1: Setup ─────────────────────────────────────────────────────
+  function startStory() {
+    const name = document.getElementById('story-name').value.trim();
+    if (!name) return alert('Enter a story name');
+    showId = crypto.randomUUID();
+    document.getElementById('show-id-display').textContent = `show_id: ${showId}`;
+    show('screen-draw');
+  }
 
-      if (!playCtx || playCtx.state === 'closed') {
-        playCtx = new AudioContext({ sampleRate: 24000 });
-      }
+  // ── Canvas setup ─────────────────────────────────────────────────────────
+  const canvas1 = document.getElementById('draw-canvas');
+  const ctx1 = canvas1.getContext('2d');
+  initCanvas(canvas1, ctx1);
 
-      const buf = playCtx.createBuffer(1, float32.length, 24000);
-      buf.copyToChannel(float32, 0);
-      const src = playCtx.createBufferSource();
-      src.buffer = buf;
-      src.connect(playCtx.destination);
-      src.onended = playNext;
-      src.start();
-    }
+  const canvas2 = document.getElementById('draw-canvas-2');
+  const ctx2 = canvas2.getContext('2d');
+  initCanvas(canvas2, ctx2);
 
-    function stopSession() {
-      worklet?.disconnect();
-      source?.disconnect();
-      stream?.getTracks().forEach(t => t.stop());
-      audioCtx?.close();
-      ws?.close();
-      audioQueue = [];
-      isPlaying = false;
-      resetUI();
-    }
-
-    function resetUI() {
-      btn.textContent = 'Start talking';
-      btn.className = '';
-      btn.disabled = false;
-      orb.className = '';
-    }
-
-    btn.onclick = () => {
-      if (ws?.readyState === WebSocket.OPEN) stopSession();
-      else startSession();
+  function initCanvas(canvas, ctx) {
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    let drawing = false;
+    const brushId = canvas === canvas1 ? 'brush-size' : 'brush-size-2';
+    const pos = (e) => {
+      const r = canvas.getBoundingClientRect();
+      const s = e.touches ? e.touches[0] : e;
+      return { x: (s.clientX - r.left) * (canvas.width / r.width), y: (s.clientY - r.top) * (canvas.height / r.height) };
     };
+    const down = (e) => { drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); e.preventDefault(); };
+    const move = (e) => {
+      if (!drawing) return;
+      const p = pos(e);
+      ctx.lineWidth = document.getElementById(brushId).value;
+      ctx.lineCap = 'round'; ctx.strokeStyle = '#111';
+      ctx.lineTo(p.x, p.y); ctx.stroke(); e.preventDefault();
+    };
+    const up = () => drawing = false;
+    canvas.addEventListener('mousedown', down); canvas.addEventListener('mousemove', move);
+    canvas.addEventListener('mouseup', up); canvas.addEventListener('mouseleave', up);
+    canvas.addEventListener('touchstart', down, { passive: false });
+    canvas.addEventListener('touchmove', move, { passive: false });
+    canvas.addEventListener('touchend', up);
+  }
 
-    function float32ToInt16(f32) {
-      const i16 = new Int16Array(f32.length);
-      for (let i = 0; i < f32.length; i++) {
-        i16[i] = Math.max(-32768, Math.min(32767, Math.round(f32[i] * 32768)));
+  function clearCanvas() { ctx1.fillStyle = '#fff'; ctx1.fillRect(0, 0, canvas1.width, canvas1.height); }
+  function clearCanvas2() { ctx2.fillStyle = '#fff'; ctx2.fillRect(0, 0, canvas2.width, canvas2.height); }
+
+  // ── Screen 2: Submit character ───────────────────────────────────────────
+  async function submitCharacter() {
+    const name = document.getElementById('char-name').value.trim();
+    if (!name) return alert('Give your character a name');
+    await addCharacter(name, canvas1, 'btn-add-char', 'char-status', 'styled-img', 'char-description');
+    setTimeout(() => show('screen-scene'), 1500);
+  }
+
+  function skipCharacter() { show('screen-scene'); }
+
+  // ── Screen 3: Generate scene ─────────────────────────────────────────────
+  async function generateScene() {
+    const input = document.getElementById('scene-input').value.trim();
+    if (!input) return alert('Describe the scene');
+    const btn = document.getElementById('btn-generate');
+    const status = document.getElementById('scene-status');
+    btn.disabled = true;
+    document.getElementById('scene-result').style.display = 'none';
+    document.getElementById('loading-draw-area').style.display = 'block';
+    status.innerHTML = `<span class="loader"></span>Generating scene ${currentScene} with Veo (~1 min)...`;
+
+    try {
+      const res = await fetch('/api/generate-scene', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_id: showId, scene_number: currentScene, user_input: input })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+
+      scenes.push(data);
+      document.getElementById('loading-draw-area').style.display = 'none';
+      document.getElementById('scene-title').textContent = data.episode_title;
+      document.getElementById('scene-video').src = data.video_url;
+      document.getElementById('scene-next-hint').textContent = data.next_prompt || '';
+      document.getElementById('scene-result').style.display = 'block';
+      status.textContent = `✓ Scene ${currentScene} ready!`;
+
+      if (currentScene < TOTAL_SCENES) {
+        currentScene++;
+        document.getElementById('scene-heading').textContent = `Scene ${currentScene} of ${TOTAL_SCENES}`;
+        document.getElementById('btn-generate').textContent = `Generate Scene ${currentScene}`;
+        document.getElementById('scene-input').value = '';
+        if (data.next_prompt) {
+          const hint = document.getElementById('next-prompt-display');
+          hint.textContent = `💬 ${data.next_prompt}`;
+          hint.style.display = 'block';
+        }
+        btn.disabled = false;
+      } else {
+        status.textContent = '✓ All scenes done!';
+        showFinale();
       }
-      return i16;
+    } catch (e) {
+      status.className = 'status error';
+      status.textContent = `Error: ${e.message}`;
+      document.getElementById('loading-draw-area').style.display = 'none';
+      btn.disabled = false;
     }
+  }
 
-    function arrayBufferToBase64(buf) {
-      const bytes = new Uint8Array(buf);
-      let bin = '';
-      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-      return btoa(bin);
-    }
+  // ── Loading-time draw ────────────────────────────────────────────────────
+  async function submitLoadingCharacter() {
+    const name = document.getElementById('loading-char-name').value.trim();
+    if (!name) return alert('Name your character/object');
+    await addCharacter(name, canvas2, 'btn-add-loading', 'loading-char-status', 'styled-img-2', null);
+    document.getElementById('loading-char-status').textContent = `✓ ${name} will appear in the next scene!`;
+  }
 
-    function base64ToArrayBuffer(b64) {
-      const bin = atob(b64);
-      const buf = new ArrayBuffer(bin.length);
-      const view = new Uint8Array(buf);
-      for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
-      return buf;
+  // ── Shared character add ─────────────────────────────────────────────────
+  async function addCharacter(name, canvas, btnId, statusId, imgId, descId) {
+    const btn = document.getElementById(btnId);
+    const status = document.getElementById(statusId);
+    btn.disabled = true;
+    status.innerHTML = '<span class="loader"></span>Styling your drawing...';
+    try {
+      const res = await fetch('/api/add-character', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_id: showId, name, image_data: canvas.toDataURL('image/png') })
+      });
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const img = document.getElementById(imgId);
+      img.src = data.styled_frame_url;
+      img.style.display = 'block';
+      if (descId) document.getElementById(descId).textContent = `"${data.description}"`;
+      status.textContent = `✓ ${name} added!`;
+      btn.textContent = 'Add Another';
+      btn.disabled = false;
+    } catch (e) {
+      status.className = 'status error';
+      status.textContent = `Error: ${e.message}`;
+      btn.disabled = false;
     }
-  </script>
+  }
+
+  // ── Finale ───────────────────────────────────────────────────────────────
+  function showFinale() {
+    document.getElementById('all-scenes').innerHTML = scenes.map((s, i) => `
+      <div class="scene-card">
+        <h4>Scene ${i + 1}: ${s.episode_title}</h4>
+        <video src="${s.video_url}" controls></video>
+      </div>
+    `).join('');
+    show('screen-finale');
+  }
+
+  // ── Voice input (Web Speech API) ─────────────────────────────────────────
+  let recognition = null;
+  function toggleVoice() {
+    const btn = document.getElementById('btn-voice');
+    const indicator = document.getElementById('voice-indicator');
+    if (recognition) {
+      recognition.stop(); recognition = null;
+      btn.textContent = '🎤 Voice'; indicator.textContent = '';
+      return;
+    }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return alert('Speech recognition not supported in this browser. Use Chrome.');
+    recognition = new SR();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onresult = (e) => {
+      document.getElementById('scene-input').value =
+        Array.from(e.results).map(r => r[0].transcript).join('');
+    };
+    recognition.onend = () => { btn.textContent = '🎤 Voice'; indicator.textContent = ''; recognition = null; };
+    recognition.onerror = (e) => { indicator.textContent = `Error: ${e.error}`; };
+    recognition.start();
+    btn.textContent = '⏹ Stop';
+    indicator.textContent = '● recording';
+  }
+
+  // ── Utility ──────────────────────────────────────────────────────────────
+  function show(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    window.scrollTo(0, 0);
+  }
+</script>
 </body>
 </html>
