@@ -238,7 +238,7 @@ app.post('/api/add-character', async (req, res, next) => {
         role: 'user',
         parts: [
           { inlineData: { mimeType: 'image/png', data: base64Data } },
-          { text: `This is a child's drawing of a character named "${name}" for a story. Describe this character in 1-2 vivid sentences that could be used in a video generation prompt. Focus on appearance, colors, and personality suggested by the drawing.` }
+          { text: `This is a child's drawing of a character named "${name}" for a story. Describe this character in 1-2 vivid sentences that could be used in a video generation prompt. Focus on appearance, colors, and personality suggested by the drawing. If the character appears human or human-like, use they/them pronouns — do not assume gender.` }
         ]
       }]
     });
@@ -315,6 +315,7 @@ Rules:
 - Frame it in second-person, addressing the child directly ("You and [name] are walking when suddenly...")
 - 2–3 sentences max, full of sensory detail and drama
 - The child's creative answer will determine what actually happens in the animated scene
+- IMPORTANT: For any human or human-like characters, always use they/them pronouns. Never assume gender. Non-human characters (animals, creatures, monsters) can be referred to as "it" unless the child has indicated otherwise.
 
 Also include a short image prompt to illustrate the problem.
 
@@ -378,7 +379,7 @@ app.post('/api/scene-voice-prompt', async (req, res, next) => { try {
     model: 'gemini-2.5-flash',
     contents: [{ role: 'user', parts: [{ text: `You are making a children's story app. The child's characters are: ${charList}. The scene they described: "${user_input}".
 
-Generate ONE short, playful, specific voice prompt asking the child to make a sound or say something as their character. It should be tied to the specific character and scene (e.g. if they have a dinosaur, ask them to roar; if a princess, ask what she'd say to a dragon). Keep it to one sentence, fun, and low-pressure.
+Generate ONE short, playful, specific voice prompt asking the child to make a sound or say something as their character. It should be tied to the specific character and scene (e.g. if they have a dinosaur, ask them to roar; if they have a wizard, ask what spell they'd cast). Keep it to one sentence, fun, and low-pressure. Use they/them pronouns for any human characters — never assume gender.
 
 Respond with ONLY valid JSON: { "voice_prompt": "...", "sound_label": "a short label for the sound e.g. 'your roar' or 'what Blobby says'" }` }] }],
     config: { responseMimeType: 'application/json' }
@@ -444,6 +445,8 @@ ${storyHistory}
 ${challengeContext}
 
 This is scene ${scene_number} of 3. The child's solution must be shown WORKING — their idea succeeds in a satisfying, fun way. The animation celebrates their creativity.
+
+IMPORTANT: For any human or human-like characters, use they/them pronouns throughout. Never assume or assign a gender. Non-human characters (animals, creatures, monsters) may be referred to as "it".
 
 Respond with ONLY valid JSON:
 {
