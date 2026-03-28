@@ -90,7 +90,7 @@
 </div>
 
 <!-- Parental approval overlay -->
-<div id="approval-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:none;align-items:center;justify-content:center;">
+<div id="approval-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;align-items:center;justify-content:center;">
   <div style="background:white;border-radius:12px;padding:32px;max-width:400px;width:90%;text-align:center;">
     <div style="font-size:2rem;margin-bottom:12px;">🔒</div>
     <h3 style="margin-bottom:8px;">Parent Check</h3>
@@ -216,6 +216,21 @@
   let currentChallenge = null;
   let pendingClosingLine = null;
   let nameVoiceRec = null;
+
+  // Build a plain-text story context string from whatever we know so far.
+  // Used to give AI models context about the story the child is creating.
+  function buildStoryContext() {
+    const lines = [];
+    if (answers.charName) lines.push(`Main character: ${answers.charName}`);
+    if (characterTraits.loves) lines.push(`${answers.charName || 'Character'} loves: ${characterTraits.loves}`);
+    if (characterTraits.fears) lines.push(`${answers.charName || 'Character'} is afraid of: ${characterTraits.fears}`);
+    return lines.join('\n');
+  }
+
+  // Working story name for API calls before the child names it at the end.
+  function workingStoryName() {
+    return answers.storyName || (answers.charName ? `${answers.charName}'s Story` : '');
+  }
 
   // ── Question flow (story name → character name) ──────────────────────────
   const QUESTIONS = [
