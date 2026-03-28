@@ -31,6 +31,8 @@ export function DrawingScreen() {
   const [currentStage, setCurrentStage] = useState(0); // 0 = char1, 1 = char2, 2 = setting
   const [savedDrawings, setSavedDrawings] = useState<string[]>([]);
   const [isShaking, setIsShaking] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const showIdRef = useRef<string>(crypto.randomUUID());
 
   // Define the drawing stages
   const stages = [
@@ -238,29 +240,53 @@ export function DrawingScreen() {
     }
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
     if (context && canvasRef.current) {
       const drawingData = canvasRef.current.toDataURL('image/png');
       const newSavedDrawings = [...savedDrawings, drawingData];
       setSavedDrawings(newSavedDrawings);
       resetCanvas();
-      
+
       if (!isLastStage) {
-        // Move to next stage
         setCurrentStage(currentStage + 1);
       } else {
-        // All stages complete, save to gallery and go to viewing screen
+        // All stages complete — save characters to backend then navigate
+        setIsProcessing(true);
+        const showId = showIdRef.current;
+
+        // Send character drawings (stages 0 and 1) to backend for AI styling
+        await Promise.all(
+          [0, 1].map(async (stageIdx) => {
+            if (newSavedDrawings[stageIdx]) {
+              try {
+                await fetch('/api/add-character', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    show_id: showId,
+                    name: stages[stageIdx].label,
+                    image_data: newSavedDrawings[stageIdx],
+                  }),
+                });
+              } catch (e) {
+                console.error(`add-character failed for stage ${stageIdx}:`, e);
+              }
+            }
+          })
+        );
+
+        setIsProcessing(false);
+
         const newStory = {
           id: Date.now().toString(),
           date: new Date().toISOString(),
           drawings: newSavedDrawings,
-          title: storyDetails.length > 0 ? `Story: ${storyDetails[0]}` : "My Adventure"
+          title: storyDetails.length > 0 ? `Story: ${storyDetails[0]}` : 'My Adventure',
         };
-        
         const existingStories = JSON.parse(localStorage.getItem('tell-a-sketch-stories') || '[]');
         localStorage.setItem('tell-a-sketch-stories', JSON.stringify([newStory, ...existingStories]));
-        
-        navigate('/viewing', { state: { savedDrawings: newSavedDrawings, storyDetails } });
+
+        navigate('/viewing', { state: { savedDrawings: newSavedDrawings, storyDetails, showId } });
       }
     }
   };
@@ -449,15 +475,28 @@ export function DrawingScreen() {
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
               onClick={handleNext}
-              disabled={isShaking}
-              className={`bg-white rounded-full w-20 h-20 shadow-lg flex items-center justify-center border-4 border-gray-300 ${isShaking ? 'opacity-50' : ''}`}
+              disabled={isShaking || isProcessing}
+              className={`bg-white rounded-full w-20 h-20 shadow-lg flex items-center justify-center border-4 border-gray-300 ${isShaking || isProcessing ? 'opacity-50' : ''}`}
             >
               <span className="text-lg font-bold text-gray-700" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
-                Next
+                {isProcessing ? '...' : 'Next'}
               </span>
             </motion.button>
           </div>
         </div>
+        {/* Processing overlay */}
+        {isProcessing && (
+          <div className="absolute inset-0 bg-black/70 rounded-3xl flex flex-col items-center justify-center gap-4 z-50">
+            <motion.div
+              animate={{ rotate: 360 }}
+              transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+              className="w-16 h-16 border-4 border-[#FFD93D] border-t-transparent rounded-full"
+            />
+            <p className="text-[#FFD93D] text-2xl font-bold" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
+              Styling your characters...
+            </p>
+          </div>
+        )}
       </motion.div>
     </div>
   );
