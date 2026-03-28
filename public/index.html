@@ -74,7 +74,8 @@
 <div class="screen" id="screen-charqs">
   <div style="text-align:center;padding:8px 0 4px;">
     <div style="font-size:2rem;margin-bottom:6px;">🌟</div>
-    <p style="color:#888;font-size:13px;margin-bottom:16px;">Let's get to know your character!</p>
+    <p style="color:#888;font-size:13px;margin-bottom:4px;">Let's get to know your character!</p>
+    <p style="color:#bbb;font-size:11px;margin-bottom:16px;">✨ Coloring in your drawing while you answer...</p>
   </div>
   <div style="text-align:center;padding:12px 0;">
     <div id="charqs-text" style="font-size:1.3rem;font-weight:bold;margin-bottom:20px;min-height:2rem;"></div>
@@ -564,8 +565,12 @@
   // ── Screen 2: Submit character ───────────────────────────────────────────
   async function submitCharacter() {
     const name = answers.charName || 'Character';
-    await addCharacter(name, canvas1, 'btn-add-char', 'char-status', 'styled-img', 'char-description');
-    setTimeout(() => startCharQuestions(name), 1500);
+    // Fire styling in background — don't wait for it.
+    // The character questions take ~20s; styling takes ~5-10s, so it'll be
+    // in the DB well before scene generation starts.
+    addCharacter(name, canvas1, 'btn-add-char', 'char-status', 'styled-img', 'char-description')
+      .catch(e => console.warn('Character styling failed:', e));
+    startCharQuestions(name);
   }
 
   function skipCharacter() { startCharQuestions(answers.charName || 'Character'); }
