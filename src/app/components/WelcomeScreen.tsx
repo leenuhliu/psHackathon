@@ -94,7 +94,7 @@ export function WelcomeScreen() {
             transition={{ delay: 0.3, type: "spring" }}
             whileHover={{ scale: 1.1 }}
             whileTap={{ scale: 0.95 }}
-            onClick={() => navigate('/story-choice')}
+            onClick={() => navigate('/setting-selection')}
             className="bg-[#FF6B6B] text-white px-16 py-6 rounded-full text-3xl font-bold shadow-2xl hover:bg-[#FF5252] transition-colors"
             style={{ fontFamily: 'Comic Sans MS, cursive' }}
           >

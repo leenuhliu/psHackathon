@@ -16,7 +16,7 @@ export function StoryChoiceScreen() {
         animate={{ opacity: 1, x: 0 }}
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
-        onClick={() => navigate('/')}
+        onClick={() => navigate('/setting-selection')}
         className="absolute top-8 left-8 bg-white text-gray-700 px-6 py-3 rounded-full text-xl font-bold shadow-lg hover:shadow-xl transition-all flex items-center gap-2 border-4 border-gray-300 z-10"
         style={{ fontFamily: 'Comic Sans MS, cursive' }}
       >
@@ -130,7 +130,7 @@ export function StoryChoiceScreen() {
           <motion.button
             whileHover={{ scale: 1.05, y: -5 }}
             whileTap={{ scale: 0.95 }}
-            onClick={() => navigate('/listening')}
+            onClick={() => navigate('/drawing', { state: { flowType: 'make-my-own' } })}
             className="bg-[#4ECDC4] text-white px-12 py-12 rounded-3xl shadow-2xl hover:bg-[#3DBDB3] transition-colors flex flex-col items-center gap-6 min-w-[320px] border-8 border-[#3DBDB3]"
           >
             <motion.div

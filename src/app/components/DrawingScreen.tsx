@@ -308,7 +308,7 @@ export function DrawingScreen() {
   };
 
   return (
-    <div className="size-full bg-white flex flex-col items-center justify-center overflow-hidden">
+    <div className="size-full bg-white flex flex-col items-center justify-center overflow-y-auto">
       {/* Etch-A-Sketch container */}
       <motion.div
         initial={{ scale: 0.9, opacity: 0 }}
@@ -320,7 +320,7 @@ export function DrawingScreen() {
           rotate: [0, -3, 3, -3, 3, -2, 2, -1, 1, -0.5, 0.5, 0]
         } : { scale: 1, opacity: 1, x: 0, y: 0, rotate: 0 }}
         transition={isShaking ? { duration: 0.75, ease: "easeInOut" } : { duration: 0.3 }}
-        className="relative bg-gradient-to-br from-red-600 via-red-600 to-red-700 rounded-3xl shadow-2xl p-[24px] mt-[100px]"
+        className="relative bg-gradient-to-br from-red-600 via-red-600 to-red-700 rounded-3xl shadow-2xl p-[24px] mt-[60px] mb-4"
         style={{ width: '880px', height: '620px' }}
       >
         {/* Simon hovering above instruction */}
