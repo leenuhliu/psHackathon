@@ -465,12 +465,9 @@ Respond with ONLY valid JSON:
       config: { responseMimeType: 'application/json' }
     });
     const prompts = JSON.parse(result.text);
-    const finalVeoPrompt = voice_response
-      ? `${prompts.veo_prompt} At one point the character opens their mouth and the words "${voice_response}" appear in a fun speech bubble above them.`
-      : prompts.veo_prompt;
 
-    log('starting_generation', 'Kicking off Veo 3 + Lyria in parallel...');
-    // Fire both; Lyria usually finishes first, Veo returns an operation handle
+    // Start Lyria immediately — we have the prompt and don't need voice_response for music
+    log('lyria_starting', 'Starting Lyria music in background...');
     let lyriaRes;
     const lyriaPromise = ai.models.generateContent({
       model: 'lyria-3-clip-preview',
@@ -478,6 +475,25 @@ Respond with ONLY valid JSON:
       config: { responseModalities: ['AUDIO'] },
     }).then(r => { lyriaRes = r; log('lyria_done', `Lyria music ready (+${Date.now()-t0}ms)`); return r; });
 
+    // Pause here and wait for the voice moment result from the frontend.
+    // The frontend sends it via POST /api/scene-voice-response/:jobId.
+    // If the child already responded before we got here, pendingVoiceResponse is set.
+    log('awaiting_voice', 'Prompts ready — waiting for voice moment...');
+    const resolvedVoice = await new Promise((resolve) => {
+      const job = jobs.get(jobId);
+      if (Object.prototype.hasOwnProperty.call(job, 'pendingVoiceResponse')) {
+        resolve(job.pendingVoiceResponse);
+      } else {
+        job.resolveVoice = resolve;
+      }
+    });
+    console.log(`[job:${jobId.slice(0,8)}] voice_response received: ${resolvedVoice ? `"${resolvedVoice}"` : 'skipped'}`);
+
+    const finalVeoPrompt = resolvedVoice
+      ? `${prompts.veo_prompt} At one point the character opens their mouth and the words "${resolvedVoice}" appear in a fun speech bubble above them.`
+      : prompts.veo_prompt;
+
+    log('starting_veo', 'Starting Veo video generation...');
     const veoOp0 = await ai.models.generateVideos({
       model: 'veo-3.1-fast-generate-001',
       prompt: finalVeoPrompt,
@@ -567,6 +583,24 @@ app.get('/api/scene-progress/:jobId', (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   res.json(job);
+});
+
+// Deliver voice moment result to a waiting pipeline job.
+// The job may already be at the voice barrier, or it may arrive later —
+// both orderings are handled.
+app.post('/api/scene-voice-response/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  const voice_response = req.body.voice_response ?? null;
+  if (job.resolveVoice) {
+    // Pipeline is already waiting — unblock it immediately
+    job.resolveVoice(voice_response);
+    delete job.resolveVoice;
+  } else {
+    // Pipeline hasn't reached the barrier yet — store for when it arrives
+    job.pendingVoiceResponse = voice_response;
+  }
+  res.json({ ok: true });
 });
 
 // Return JSON for any unhandled errors instead of Express HTML

@@ -640,20 +640,46 @@
     btn.disabled = true;
     fadeOutLyria();
     document.getElementById('scene-result').style.display = 'none';
-    status.innerHTML = `<span class="loader"></span>Thinking of a fun voice moment...`;
+    status.innerHTML = `<span class="loader"></span>Preparing...`;
 
-    // Fetch a character-specific voice prompt
+    // Fire the pipeline job AND voice-prompt fetch at the same time.
+    // The job runs moderation + context + prompts + Lyria while the child
+    // does the voice moment, then pauses at a barrier waiting for voice_response.
     capturedVoiceResponse = null;
-    try {
-      const vpRes = await fetch('/api/scene-voice-prompt', {
+    const [startRes, vpRes] = await Promise.all([
+      fetch('/api/generate-scene', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          show_id: showId, scene_number: currentScene, solution,
+          challenge_text: currentChallenge?.challenge_text || '',
+          story_name: answers.storyName,
+          parent_approved, character_traits: characterTraits
+          // voice_response is NOT included — delivered separately via /api/scene-voice-response
+        })
+      }),
+      fetch('/api/scene-voice-prompt', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ show_id: showId, user_input: solution })
-      });
-      const vpData = await vpRes.json();
+      }).catch(() => null)
+    ]);
+
+    const { job_id, error: startErr } = await startRes.json();
+    if (startErr) throw new Error(startErr);
+
+    // Show voice moment while pipeline is already running in background
+    try {
+      const vpData = vpRes ? await vpRes.json() : {};
       if (vpData.voice_prompt) {
         capturedVoiceResponse = await showVoiceMoment(vpData.voice_prompt);
       }
     } catch (_) {}
+
+    // Deliver voice response to the waiting pipeline (unblocks Veo start)
+    fetch(`/api/scene-voice-response/${job_id}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voice_response: capturedVoiceResponse })
+    }).catch(() => {});
 
     document.getElementById('voice-moment').style.display = 'none';
     hideSolutionInput();
@@ -662,20 +688,6 @@
     status.innerHTML = `<span class="loader"></span>Starting...`;
 
     try {
-      // Start job
-      const startRes = await fetch('/api/generate-scene', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          show_id: showId, scene_number: currentScene, solution,
-          challenge_text: currentChallenge?.challenge_text || '',
-          story_name: answers.storyName,
-          parent_approved, voice_response: capturedVoiceResponse,
-          character_traits: characterTraits
-        })
-      });
-      const { job_id, error: startErr } = await startRes.json();
-      if (startErr) throw new Error(startErr);
 
       // Poll until done
       const data = await pollSceneJob(job_id, status);
@@ -729,8 +741,10 @@
     moderation:         '🔍 Checking story content...',
     loading_context:    '📖 Loading story context...',
     building_prompts:   '✍️  Writing scene script...',
-    starting_generation:'🚀 Kicking off Veo + Lyria...',
-    lyria_done:         '🎵 Music ready, waiting for video...',
+    lyria_starting:     '🎵 Starting music generation...',
+    awaiting_voice:     '✅ Script ready — do the voice moment!',
+    starting_veo:       '🎬 Starting Veo video generation...',
+    lyria_done:         '🎵 Music ready, animating...',
     veo_queued:         '🎬 Veo job submitted...',
     veo_polling:        '🎬 Animating...',
     veo_done:           '✅ Video done, saving...',
