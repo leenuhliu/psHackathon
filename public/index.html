@@ -647,40 +647,38 @@
     document.getElementById('scene-result').style.display = 'none';
     status.innerHTML = `<span class="loader"></span>Preparing...`;
 
-    // Fire the pipeline job AND voice-prompt fetch at the same time.
-    // The job runs moderation + context + prompts + Lyria while the child
-    // does the voice moment, then pauses at a barrier waiting for voice_response.
     capturedVoiceResponse = null;
-    const [startRes, vpRes] = await Promise.all([
-      fetch('/api/generate-scene', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          show_id: showId, scene_number: currentScene, solution,
-          challenge_text: currentChallenge?.challenge_text || '',
-          story_name: answers.storyName,
-          parent_approved, character_traits: characterTraits
-          // voice_response is NOT included — delivered separately via /api/scene-voice-response
-        })
-      }),
-      fetch('/api/scene-voice-prompt', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, user_input: solution })
-      }).catch(() => null)
-    ]);
 
+    // Start job immediately — generate-scene returns a job_id instantly
+    const startRes = await fetch('/api/generate-scene', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        show_id: showId, scene_number: currentScene, solution,
+        challenge_text: currentChallenge?.challenge_text || '',
+        story_name: answers.storyName,
+        parent_approved, character_traits: characterTraits
+      })
+    });
     const { job_id, error: startErr } = await startRes.json();
     if (startErr) throw new Error(startErr);
 
-    // Show voice moment while pipeline is already running in background
+    // Start polling immediately — status display updates live from here
+    const resultPromise = pollSceneJob(job_id, status);
+
+    // Concurrently fetch voice prompt + show voice moment while pipeline warms up
     try {
-      const vpData = vpRes ? await vpRes.json() : {};
+      const vpRes = await fetch('/api/scene-voice-prompt', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_id: showId, user_input: solution })
+      });
+      const vpData = await vpRes.json();
       if (vpData.voice_prompt) {
         capturedVoiceResponse = await showVoiceMoment(vpData.voice_prompt);
       }
     } catch (_) {}
 
-    // Deliver voice response to the waiting pipeline (unblocks Veo start)
+    // Deliver voice response — unblocks Veo in the pipeline
     fetch(`/api/scene-voice-response/${job_id}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ voice_response: capturedVoiceResponse })
@@ -690,12 +688,10 @@
     hideSolutionInput();
     document.getElementById('challenge-box').style.display = 'none';
     document.getElementById('loading-draw-area').style.display = 'block';
-    status.innerHTML = `<span class="loader"></span>Starting...`;
 
     try {
-
-      // Poll until done
-      const data = await pollSceneJob(job_id, status);
+      // Await the already-running poll
+      const data = await resultPromise;
 
       if (data.needs_approval) {
         document.getElementById('loading-draw-area').style.display = 'none';

@@ -299,11 +299,10 @@ async function buildChallenge(scene_number, { characterContext, traitContext, st
     ? 'Scene 3, the grand finale — make this feel like a big satisfying conclusion encounter'
     : `Scene ${scene_number} of 3${scene_number > 1 ? ' — raise the stakes a little from the previous scene' : ''}`;
 
-  // Get challenge text and image in parallel
-  const [textResult, imageResult] = await Promise.all([
-    ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [{ role: 'user', parts: [{ text: `You are a master storyteller for a children's interactive story app (ages 4–10).
+  // Step 1: generate challenge text
+  const textResult = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{ role: 'user', parts: [{ text: `You are a master storyteller for a children's interactive story app (ages 4–10).
 
 Story name: "${story_name || 'Our Story'}"
 ${characterContext}
@@ -314,37 +313,33 @@ Generate an exciting, age-appropriate CHALLENGE or ENCOUNTER for ${sceneLabel}.
 
 Rules:
 - Match the genre/setting already established (fantasy → magic problems, school → social/creative challenges, adventure → physical obstacles, etc.)
-- Pose ONE clear, vivid problem that the child (as the hero) must solve creatively — a blocked path, a creature that needs help, a mystery, a locked door, a character who is sad, etc.
-- The challenge should feel like a direct consequence of or natural continuation from the story so far
-- Frame it in second-person, addressing the child directly ("You and [name] are walking when suddenly...")
-- 2–3 sentences max, full of sensory detail and drama
-- The child's creative answer will determine what actually happens in the animated scene
-- IMPORTANT: For any human or human-like characters, always use they/them pronouns. Never assume gender. Non-human characters (animals, creatures, monsters) can be referred to as "it" unless the child has indicated otherwise.
+- Pose ONE simple, clear problem the child must solve — a blocked path, a creature that needs help, a locked door, a friend who is sad, something that's lost, etc.
+- The challenge should follow naturally from the story so far
+- Address the child directly in second-person ("You and [name] are walking when suddenly...")
+- 1–2 short sentences only — keep it simple and easy to read aloud
+- End with a direct question: "What do you do?" or "How do you help?"
+- The child's creative answer will decide what happens in the scene
+- IMPORTANT: Refer to the main character by their name (e.g. "Blobby finds a door" not "they find a door"). Never use gendered pronouns (he/she/him/her). For unnamed supporting characters, use "they/them".
 - ${CHILD_VOCAB}
-
-Also include a short image prompt to illustrate the problem.
 
 Respond with ONLY valid JSON:
 {
-  "challenge_text": "Full vivid challenge addressed to the child",
-  "challenge_short": "5–8 word dramatic summary (e.g. 'A giant spider guards the bridge!')",
-  "image_prompt": "A simple children's book illustration showing the problem: [describe the obstacle/creature/scene clearly in 1 sentence, hand-drawn cartoon style, warm colors, no text]"
+  "challenge_text": "The challenge sentence(s) addressed to the child",
+  "challenge_short": "5–8 word dramatic summary (e.g. 'A giant spider guards the bridge!')"
 }` }] }],
-      config: { responseMimeType: 'application/json' }
-    }),
-    // Small challenge illustration
-    ai.models.generateContent({
-      model: 'gemini-2.5-flash-image',
-      contents: [{ role: 'user', parts: [{ text: `A simple, colorful children's storybook illustration showing a dramatic challenge or obstacle. Hand-drawn cartoon style, warm vibrant colors, expressive and fun, clear focal point, no text. Scene: ${storyHistory.split('|').slice(-1)[0] || 'an adventure in a colorful world'}.` }] }],
-      config: { responseModalities: ['IMAGE', 'TEXT'] }
-    }).catch(() => null)  // don't fail the whole challenge if image generation errors
-  ]);
+    config: { responseMimeType: 'application/json' }
+  });
 
   const challenge = JSON.parse(textResult.text);
 
-  // Save image if we got one
-  if (imageResult && show_id) {
+  // Step 2: generate illustration using the exact challenge text so it matches
+  if (show_id) {
     try {
+      const imageResult = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: [{ role: 'user', parts: [{ text: `Draw a simple, colorful children's storybook illustration for this story moment: "${challenge.challenge_text}" — hand-drawn cartoon style, warm bright colors, expressive and fun, clear focal point, no text in the image.` }] }],
+        config: { responseModalities: ['IMAGE', 'TEXT'] }
+      });
       const imgPart = imageResult.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('image'));
       if (imgPart) {
         const imgFilename = `${show_id}-challenge-${scene_number}-${Date.now()}.png`;
@@ -384,7 +379,7 @@ app.post('/api/scene-voice-prompt', async (req, res, next) => { try {
     model: 'gemini-2.5-flash',
     contents: [{ role: 'user', parts: [{ text: `You are making a children's story app. The child's characters are: ${charList}. The scene they described: "${user_input}".
 
-Generate ONE short, playful, specific voice prompt asking the child to make a sound or say something as their character. It should be tied to the specific character and scene (e.g. if they have a dinosaur, ask them to roar; if they have a wizard, ask what spell they'd cast). Keep it to one sentence, fun, and low-pressure. Use they/them pronouns for any human characters — never assume gender. ${CHILD_VOCAB}
+Generate ONE short, playful, specific voice prompt asking the child to make a sound or say something as their character. It should be tied to the specific character and scene (e.g. if they have a dinosaur, ask them to roar; if they have a wizard, ask what spell they'd cast). Keep it to one sentence, fun, and low-pressure. Use the character's name instead of pronouns. Never use he/she/him/her. ${CHILD_VOCAB}
 
 Respond with ONLY valid JSON: { "voice_prompt": "...", "sound_label": "a short label for the sound e.g. 'your roar' or 'what Blobby says'" }` }] }],
     config: { responseMimeType: 'application/json' }
@@ -456,7 +451,7 @@ ${challengeContext}
 
 This is scene ${scene_number} of 3. The child's solution must be shown WORKING — their idea succeeds in a satisfying, fun way. The animation celebrates their creativity.
 
-IMPORTANT: For any human or human-like characters, use they/them pronouns throughout. Never assume or assign a gender. Non-human characters (animals, creatures, monsters) may be referred to as "it".
+IMPORTANT: Refer to the main character by their name throughout (e.g. "Blobby jumps over the rock" not "they jump over the rock"). Never use gendered pronouns (he/she/him/her). For unnamed supporting characters use "they/them".
 
 ${CHILD_VOCAB}
 
