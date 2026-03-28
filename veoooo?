@@ -1,0 +1,350 @@
+/**
+ * server.js  —  Story Builder backend
+ *
+ * Endpoints expected by index.html:
+ *   POST /api/generate-scene          → starts a background job, returns { job_id }
+ *   GET  /api/scene-progress/:job_id  → polls job status
+ *   POST /api/scene-voice-response/:job_id → unblocks Veo after voice moment
+ *   POST /api/generate-challenge      → returns challenge for a scene
+ *   POST /api/scene-voice-prompt      → returns voice-moment prompt text
+ *   POST /api/add-character           → styles a drawing via Gemini
+ *   POST /api/narrate                 → Gemini TTS, returns audio blob
+ *   GET  /api/show-bible              → returns full story for revisit screen
+ *   GET  /api/export-story/:show_id   → stitches scenes into one MP4
+ *   PATCH /api/story/:show_id         → rename a story
+ *   DELETE /api/story/:show_id        → delete a story
+ *   GET  /api/scene-video/:filename   → serves generated MP4 files
+ */
+
+import 'dotenv/config';
+import express from 'express';
+import { GoogleGenAI } from '@google/genai';
+import { randomUUID } from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+app.use(express.json({ limit: '20mb' }));
+
+// ── Serve your frontend ────────────────────────────────────────────────────
+// Put index.html in the same folder as server.js (or change this path)
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ── Storage ────────────────────────────────────────────────────────────────
+const VIDEOS_DIR = path.join(__dirname, 'generated-videos');
+fs.mkdirSync(VIDEOS_DIR, { recursive: true });
+
+// In-memory story store (replace with a real DB like SQLite/Postgres later)
+const stories = {};   // showId → { characters: [], episodes: [], story_name: '' }
+const jobs    = {};   // jobId  → { status, step, elapsed_ms, result, error, veo_poll, voiceResolve }
+
+function getStory(showId) {
+  if (!stories[showId]) stories[showId] = { characters: [], episodes: [], story_name: '' };
+  return stories[showId];
+}
+
+// ── Gemini client ──────────────────────────────────────────────────────────
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function setStep(job, step) {
+  job.step  = step;
+  job.elapsed_ms = Date.now() - job.startTime;
+}
+
+async function geminiText(prompt, systemInstruction) {
+  const res = await ai.models.generateContent({
+    model: 'gemini-2.0-flash',
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    ...(systemInstruction ? { systemInstruction } : {}),
+  });
+  return res.candidates[0].content.parts[0].text.trim();
+}
+
+// ── POST /api/generate-challenge ──────────────────────────────────────────
+app.post('/api/generate-challenge', async (req, res) => {
+  const { show_id, scene_number, story_name, character_traits, story_context } = req.body;
+  try {
+    const raw = await geminiText(
+      `You are a playful children's story AI. Generate a short, fun challenge/obstacle for scene ${scene_number} of a story called "${story_name}".
+Story context: ${story_context || 'not provided'}
+Character traits: ${JSON.stringify(character_traits || {})}
+
+Reply ONLY with a JSON object: { "challenge_text": "...", "challenge_image_url": null }
+Keep challenge_text to 1-2 sentences, vivid and age-appropriate.`,
+    );
+    const json = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    res.json(json);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/scene-voice-prompt ──────────────────────────────────────────
+app.post('/api/scene-voice-prompt', async (req, res) => {
+  const { show_id, user_input } = req.body;
+  try {
+    const text = await geminiText(
+      `A child just said what their character does: "${user_input}".
+Write ONE short, excited question (max 10 words) to ask the child to record a voice line for their character.
+Example: "What does your character shout as they leap?" — just output the question, nothing else.`,
+    );
+    res.json({ voice_prompt: text });
+  } catch (e) {
+    res.json({ voice_prompt: null });
+  }
+});
+
+// ── POST /api/narrate ──────────────────────────────────────────────────────
+app.post('/api/narrate', async (req, res) => {
+  const { text } = req.body;
+  try {
+    // Gemini TTS (Live API / speech synthesis)
+    const ttsRes = await ai.models.generateContent({
+      model: 'gemini-2.5-flash-preview-tts',
+      contents: [{ role: 'user', parts: [{ text }] }],
+      generationConfig: { responseModalities: ['AUDIO'], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } } },
+    });
+    const audioB64 = ttsRes.candidates[0].content.parts[0].inlineData.data;
+    const buf = Buffer.from(audioB64, 'base64');
+    res.set('Content-Type', 'audio/wav');
+    res.send(buf);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/add-character ────────────────────────────────────────────────
+app.post('/api/add-character', async (req, res) => {
+  const { show_id, name, image_data } = req.body;
+  try {
+    // Ask Gemini to describe the drawing and "style" it
+    const base64 = image_data.replace(/^data:image\/\w+;base64,/, '');
+    const descRes = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/png', data: base64 } },
+          { text: `This is a child's drawing of a character named "${name}". Describe it in 1-2 sentences as if describing a cartoon character. Be positive and imaginative.` }
+        ]
+      }]
+    });
+    const description = descRes.candidates[0].content.parts[0].text.trim();
+
+    const story = getStory(show_id);
+    story.characters.push({ name, description, styled_frame_url: null });
+
+    // Return immediately — in production you'd run image generation here
+    res.json({ styled_frame_url: image_data, description });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── POST /api/generate-scene  (starts background job) ─────────────────────
+app.post('/api/generate-scene', async (req, res) => {
+  const {
+    show_id, scene_number, solution, challenge_text,
+    story_name, parent_approved, character_traits, story_context
+  } = req.body;
+
+  const jobId = randomUUID();
+  jobs[jobId] = {
+    status: 'running', step: 'queued', elapsed_ms: 0,
+    startTime: Date.now(), veo_poll: 0,
+    result: null, error: null,
+    voiceResolve: null,   // set by /api/scene-voice-response/:jobId
+  };
+
+  // Run the full pipeline in the background
+  runScenePipeline(jobId, {
+    show_id, scene_number, solution, challenge_text,
+    story_name, parent_approved, character_traits, story_context
+  }).catch(e => {
+    jobs[jobId].status = 'error';
+    jobs[jobId].error  = e.message;
+  });
+
+  res.json({ job_id: jobId });
+});
+
+// ── GET /api/scene-progress/:job_id ───────────────────────────────────────
+app.get('/api/scene-progress/:jobId', (req, res) => {
+  const job = jobs[req.params.jobId];
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  job.elapsed_ms = Date.now() - job.startTime;
+  res.json(job);
+});
+
+// ── POST /api/scene-voice-response/:job_id ────────────────────────────────
+// Called by the frontend after the voice moment (or when it's skipped).
+// Unblocks the Veo step which waits for this signal.
+app.post('/api/scene-voice-response/:jobId', (req, res) => {
+  const job = jobs[req.params.jobId];
+  if (job?.voiceResolve) {
+    job.voiceResolve(req.body.voice_response ?? null);
+    job.voiceResolve = null;
+  }
+  res.json({ ok: true });
+});
+
+// ── The full scene pipeline ────────────────────────────────────────────────
+async function runScenePipeline(jobId, params) {
+  const job = jobs[jobId];
+  const { show_id, scene_number, solution, challenge_text, story_name, character_traits, story_context } = params;
+
+  // ── Step 1: build prompts with Gemini ───────────────────────────────────
+  setStep(job, 'building_prompts');
+  const promptsRaw = await geminiText(
+    `You are a children's animated story writer. 
+Story: "${story_name}"
+Scene number: ${scene_number} of 3
+Character's action: "${solution}"
+Challenge they faced: "${challenge_text}"
+Story context: ${story_context || 'none'}
+
+Write a short animated scene for this story. Reply ONLY with JSON:
+{
+  "episode_title": "short catchy title",
+  "veo_prompt": "vivid 2-3 sentence description for a video AI — describe what happens visually, mention hand-drawn doodle animation style, colourful, child-friendly",
+  "next_challenge_text": "a new challenge for the next scene (null if scene_number is 3)",
+  "closing_line": "a warm closing narration line (only if scene_number is 3, else null)"
+}`,
+  );
+
+  let prompts;
+  try {
+    prompts = JSON.parse(promptsRaw.replace(/```json|```/g, '').trim());
+  } catch {
+    throw new Error('Failed to parse scene prompts from Gemini.');
+  }
+
+  // ── Step 2: wait for voice response from frontend ────────────────────────
+  setStep(job, 'awaiting_voice');
+  const voiceResponse = await new Promise((resolve) => {
+    job.voiceResolve = resolve;
+    // Auto-resolve after 35 seconds in case frontend never calls back
+    setTimeout(() => { if (job.voiceResolve) { job.voiceResolve(null); job.voiceResolve = null; } }, 35_000);
+  });
+
+  // Optionally fold voiceResponse into veo_prompt
+  let veoPrompt = prompts.veo_prompt;
+  if (voiceResponse) {
+    veoPrompt += ` The character exclaims: "${voiceResponse}".`;
+  }
+
+  // ── Step 3: kick off Veo ─────────────────────────────────────────────────
+  setStep(job, 'starting_veo');
+  let operation = await ai.models.generateVideos({
+    model: 'veo-3.1-fast-generate-001',
+    prompt: veoPrompt,
+    config: { aspectRatio: '16:9', durationSeconds: 8 },
+  });
+
+  setStep(job, 'veo_queued');
+
+  // ── Step 4: poll until done ───────────────────────────────────────────────
+  const VEO_TIMEOUT = 8 * 60 * 1000;
+  const veoStart = Date.now();
+
+  while (!operation.done) {
+    if (Date.now() - veoStart > VEO_TIMEOUT) throw new Error('Veo timed out after 8 minutes.');
+    await new Promise(r => setTimeout(r, 10_000));
+    job.veo_poll++;
+    setStep(job, 'veo_polling');
+    operation = await ai.operations.getVideosOperation({ operation });
+  }
+
+  if (operation.error) throw new Error(`Veo error: ${JSON.stringify(operation.error)}`);
+  if (!operation.response?.generatedVideos?.length) throw new Error('Veo returned no videos.');
+
+  setStep(job, 'veo_done');
+
+  // ── Step 5: download & save video ────────────────────────────────────────
+  setStep(job, 'saving');
+  const filename = `${show_id}_scene${scene_number}_${Date.now()}.mp4`;
+  const savePath  = path.join(VIDEOS_DIR, filename);
+  await ai.files.download({
+    file: operation.response.generatedVideos[0].video,
+    downloadPath: savePath,
+  });
+
+  const videoUrl = `/api/scene-video/${filename}`;
+
+  // ── Step 6: placeholder audio (swap with Lyria when available) ────────────
+  // For now we return an empty audio URL; swap this with a real Lyria call.
+  const audioUrl = '';
+
+  // ── Step 7: persist to story store ───────────────────────────────────────
+  setStep(job, 'saving_db');
+  const story = getStory(show_id);
+  story.story_name = story_name;
+  const episode = {
+    episode_number: scene_number,
+    title: prompts.episode_title,
+    veo_clip_url: videoUrl,
+    audio_url: audioUrl,
+  };
+  story.episodes.push(episode);
+
+  // ── Step 8: optionally generate next challenge ────────────────────────────
+  let next_challenge = null;
+  if (scene_number < 3 && prompts.next_challenge_text) {
+    setStep(job, 'next_challenge');
+    next_challenge = { challenge_text: prompts.next_challenge_text, challenge_image_url: null };
+  }
+
+  // ── Done ─────────────────────────────────────────────────────────────────
+  job.result = {
+    episode_title: prompts.episode_title,
+    video_url:     videoUrl,
+    audio_url:     audioUrl,
+    next_challenge,
+    closing_line:  prompts.closing_line ?? null,
+  };
+  job.status = 'done';
+  setStep(job, 'done');
+}
+
+// ── GET /api/scene-video/:filename  (serve generated MP4s) ───────────────
+app.get('/api/scene-video/:filename', (req, res) => {
+  const file = path.join(VIDEOS_DIR, path.basename(req.params.filename));
+  if (!fs.existsSync(file)) return res.status(404).json({ error: 'Video not found' });
+  res.sendFile(file);
+});
+
+// ── GET /api/show-bible  (revisit screen) ────────────────────────────────
+app.get('/api/show-bible', (req, res) => {
+  const story = stories[req.query.show_id];
+  if (!story) return res.status(404).json({ error: 'Story not found' });
+  res.json(story);
+});
+
+// ── GET /api/export-story/:show_id  (stub — wire up ffmpeg to stitch) ────
+app.get('/api/export-story/:show_id', (req, res) => {
+  const story = stories[req.params.show_id];
+  if (!story || !story.episodes.length) return res.status(404).json({ error: 'No episodes found' });
+  // For now return the first scene URL as a placeholder.
+  // TODO: use ffmpeg to concatenate all episode MP4s into one file.
+  res.json({ url: story.episodes[0].veo_clip_url });
+});
+
+// ── PATCH /api/story/:show_id ─────────────────────────────────────────────
+app.patch('/api/story/:showId', (req, res) => {
+  const story = getStory(req.params.showId);
+  if (req.body.story_name) story.story_name = req.body.story_name;
+  res.json({ ok: true });
+});
+
+// ── DELETE /api/story/:show_id ────────────────────────────────────────────
+app.delete('/api/story/:showId', (req, res) => {
+  delete stories[req.params.showId];
+  res.json({ ok: true });
+});
+
+// ── Start ──────────────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`Story Builder running at http://localhost:${PORT}`));
