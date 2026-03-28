@@ -240,7 +240,7 @@ app.post('/api/add-character', async (req, res, next) => {
       model: 'gemini-2.5-flash-image',
       contents: [{ role: 'user', parts: [
         { inlineData: { mimeType: 'image/png', data: base64Data } },
-        { text: `This is a child's drawing of a character named "${name}". Create a colorful cartoon sticker illustration that is COMPLETELY FAITHFUL to this drawing. Preserve every quirky proportion exactly — if the eyes are lopsided keep them lopsided, if the head is huge keep it huge, if limbs are uneven keep them uneven. White background. Children's animation style. Do NOT correct or normalize any proportions.` }
+        { text: `This is a child's drawing of a character named "${name}". Redraw it as a FULLY COLORED cartoon character with bright solid colors filling every part of the body — no outlines-only, no sketchy look, every region must be filled with vivid color. Preserve every quirky proportion EXACTLY as drawn: lopsided eyes stay lopsided, oversized head stays oversized, uneven limbs stay uneven. White background. Fun children's animation style. The character must look like a brightly colored cartoon sticker.` }
       ]}],
       config: { responseModalities: ['IMAGE', 'TEXT'] }
     });
@@ -309,8 +309,25 @@ app.post('/api/narrate', async (req, res, next) => { try {
 
 // Core pipeline: user input → Gemini prompts → Veo video
 app.post('/api/generate-scene', async (req, res, next) => { try {
-  const { show_id, scene_number, user_input } = req.body;
+  const { show_id, scene_number, user_input, parent_approved } = req.body;
   if (!show_id || !user_input) return res.status(400).json({ error: 'show_id and user_input required' });
+
+  // Content moderation — skip if parent already approved
+  if (!parent_approved) {
+    const modResult = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `You are a content moderator for a children's storytelling app for ages 3-10. Assess whether the following story input is appropriate for young children. Flag it if it contains any violence, scary themes, adult content, strong language, or anything PG-13 or above.
+
+Input: "${user_input}"
+
+Respond with ONLY valid JSON: { "flagged": true/false, "reason": "brief reason if flagged, otherwise null" }` }] }],
+      config: { responseMimeType: 'application/json' }
+    });
+    const mod = JSON.parse(modResult.text);
+    if (mod.flagged) {
+      return res.json({ needs_approval: true, reason: mod.reason });
+    }
+  }
 
   // Load characters for context
   const existingCharacters = await sql`
@@ -340,7 +357,7 @@ The child/parent just said: "${user_input}"
 
 This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
 {
-  "veo_prompt": "Detailed cinematic scene description for Veo 3. Hand-drawn doodle animation style, warm and slow-paced, 8 seconds. Include the character visually.",
+  "veo_prompt": "Detailed cinematic scene description for Veo 3. Richly colored hand-drawn animation style with vibrant fully-painted backgrounds, warm and slow-paced, 8 seconds. Include the character visually in the scene. In the very last half-second, red velvet theatrical curtains snap shut quickly from both sides, ending frozen on closed curtains with 'Scene End' in a warm storybook font in the center — this must be the very last frame.",
   "lyria_prompt": "Music prompt for Lyria. Warm, gentle, children's animated tone.",
   "episode_title": "Short fun title for this scene",
   "next_prompt": "A warm, one-sentence question to ask the child to inspire scene ${scene_number + 1}. ${scene_number >= 3 ? 'This is the last scene, so say something celebratory instead.' : ''}"

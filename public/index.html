@@ -28,20 +28,22 @@
 </head>
 <body>
 
-<!-- SCREEN 1: Setup -->
+<!-- SCREEN 1: Question flow (story name + character name) -->
 <div class="screen active" id="screen-setup">
-  <h2>🎬 New Story</h2>
-  <label>Story name</label>
-  <input id="story-name" type="text" placeholder="e.g. Blobby's Big Adventure" />
-  <button class="primary" onclick="startStory()">Start →</button>
-  <div id="show-id-display"></div>
+  <div id="question-box" style="text-align:center;padding:12px 0;">
+    <div id="question-text" style="font-size:1.3rem;font-weight:bold;margin-bottom:20px;min-height:2rem;"></div>
+    <div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:12px;">
+      <input id="question-input" type="text" placeholder="Type your answer..." style="max-width:320px;font-size:1rem;" onkeydown="if(event.key==='Enter')answerQuestion()" />
+      <button id="btn-mic" onclick="toggleQuestionVoice()" title="Use voice">🎤</button>
+    </div>
+    <div id="voice-q-indicator" style="font-size:12px;color:#c00;min-height:16px;margin-bottom:8px;"></div>
+    <button class="primary" onclick="answerQuestion()">Next →</button>
+  </div>
 </div>
 
 <!-- SCREEN 2: Draw a character -->
 <div class="screen" id="screen-draw">
-  <h2>🎨 Draw a Character</h2>
-  <label>Character name</label>
-  <input id="char-name" type="text" placeholder="e.g. Blobby" />
+  <h2 id="draw-heading">🎨 Draw a Character</h2>
   <div class="canvas-tools">
     <label>Brush: <input type="range" id="brush-size" min="2" max="30" value="8" style="width:100px;margin:0 4px;"></label>
     <button onclick="clearCanvas()">Clear</button>
@@ -53,6 +55,18 @@
   <div class="status" id="char-status"></div>
   <img class="styled" id="styled-img" style="display:none" />
   <div id="char-description" style="font-size:13px;color:#555;margin:4px 0;font-style:italic;"></div>
+</div>
+
+<!-- Parental approval overlay -->
+<div id="approval-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:100;display:none;align-items:center;justify-content:center;">
+  <div style="background:white;border-radius:12px;padding:32px;max-width:400px;width:90%;text-align:center;">
+    <div style="font-size:2rem;margin-bottom:12px;">🔒</div>
+    <h3 style="margin-bottom:8px;">Parent Check</h3>
+    <p id="approval-reason" style="color:#555;font-size:14px;margin-bottom:20px;"></p>
+    <p style="font-size:13px;color:#888;margin-bottom:20px;">A parent or guardian needs to approve this before the story continues.</p>
+    <button class="primary" onclick="approveContent()" style="margin-right:8px;">✓ Approve</button>
+    <button onclick="denyContent()">✗ Try Again</button>
+  </div>
 </div>
 
 <!-- SCREEN 3: Scene loop -->
@@ -111,14 +125,75 @@
   const TOTAL_SCENES = 3;
   const scenes = [];
 
-  // ── Screen 1: Setup ─────────────────────────────────────────────────────
-  function startStory() {
-    const name = document.getElementById('story-name').value.trim();
-    if (!name) return alert('Enter a story name');
-    showId = crypto.randomUUID();
-    document.getElementById('show-id-display').textContent = `show_id: ${showId}`;
-    show('screen-draw');
+  // ── Question flow (story name → character name) ──────────────────────────
+  const QUESTIONS = [
+    { key: 'storyName',   text: "What would you like to call your story?" },
+    { key: 'charName',    text: "Great! Now, what's your main character's name?" },
+  ];
+  let qStep = 0;
+  let answers = {};
+  let voiceRecognition = null;
+
+  function startQuestions() {
+    qStep = 0;
+    askQuestion();
   }
+
+  function askQuestion() {
+    const q = QUESTIONS[qStep];
+    document.getElementById('question-text').textContent = q.text;
+    document.getElementById('question-input').value = '';
+    document.getElementById('question-input').focus();
+    document.getElementById('voice-q-indicator').textContent = '';
+    document.getElementById('btn-mic').textContent = '🎤';
+    narrate(q.text);
+  }
+
+  function answerQuestion() {
+    const val = document.getElementById('question-input').value.trim();
+    if (!val) return;
+    stopQuestionVoice();
+    answers[QUESTIONS[qStep].key] = val;
+    qStep++;
+    if (qStep < QUESTIONS.length) {
+      askQuestion();
+    } else {
+      showId = crypto.randomUUID();
+      document.getElementById('draw-heading').textContent = `🎨 Draw ${answers.charName}`;
+      narrate(`Wonderful! Now draw ${answers.charName} on the canvas below.`);
+      show('screen-draw');
+    }
+  }
+
+  function toggleQuestionVoice() {
+    if (voiceRecognition) { stopQuestionVoice(); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return alert('Speech recognition not supported. Use Chrome.');
+    voiceRecognition = new SR();
+    voiceRecognition.continuous = false;
+    voiceRecognition.interimResults = true;
+    voiceRecognition.onresult = (e) => {
+      document.getElementById('question-input').value =
+        Array.from(e.results).map(r => r[0].transcript).join('');
+    };
+    voiceRecognition.onend = () => {
+      stopQuestionVoice();
+      answerQuestion();
+    };
+    voiceRecognition.onerror = () => stopQuestionVoice();
+    voiceRecognition.start();
+    document.getElementById('btn-mic').textContent = '⏹';
+    document.getElementById('voice-q-indicator').textContent = '● listening...';
+  }
+
+  function stopQuestionVoice() {
+    voiceRecognition?.stop(); voiceRecognition = null;
+    document.getElementById('btn-mic').textContent = '🎤';
+    document.getElementById('voice-q-indicator').textContent = '';
+  }
+
+  // Start question flow after page fully loads so narrate() is ready
+  window.addEventListener('load', () => startQuestions());
 
   // ── Canvas setup ─────────────────────────────────────────────────────────
   const canvas1 = document.getElementById('draw-canvas');
@@ -160,22 +235,40 @@
 
   // ── Screen 2: Submit character ───────────────────────────────────────────
   async function submitCharacter() {
-    const name = document.getElementById('char-name').value.trim();
-    if (!name) return alert('Give your character a name');
+    const name = answers.charName || 'Character';
     await addCharacter(name, canvas1, 'btn-add-char', 'char-status', 'styled-img', 'char-description');
     setTimeout(() => show('screen-scene'), 1500);
   }
 
   function skipCharacter() { show('screen-scene'); }
 
+  // ── Parental approval ────────────────────────────────────────────────────
+  let pendingApproval = null;
+
+  function approveContent() {
+    document.getElementById('approval-overlay').style.display = 'none';
+    if (pendingApproval) { pendingApproval(true); pendingApproval = null; }
+  }
+
+  function denyContent() {
+    document.getElementById('approval-overlay').style.display = 'none';
+    const btn = document.getElementById('btn-generate');
+    const status = document.getElementById('scene-status');
+    document.getElementById('loading-draw-area').style.display = 'none';
+    btn.disabled = false;
+    status.textContent = 'Please try a different idea.';
+    narrate('Please try a different idea for the story.');
+    pendingApproval = null;
+  }
+
   // ── Screen 3: Generate scene ─────────────────────────────────────────────
-  async function generateScene() {
+  async function generateScene(parent_approved = false) {
     const input = document.getElementById('scene-input').value.trim();
     if (!input) return alert('Describe the scene');
     const btn = document.getElementById('btn-generate');
     const status = document.getElementById('scene-status');
     btn.disabled = true;
-    stopLyria();
+    fadeOutLyria();
     document.getElementById('scene-result').style.display = 'none';
     document.getElementById('loading-draw-area').style.display = 'block';
     status.innerHTML = `<span class="loader"></span>Generating scene ${currentScene} with Veo (~1 min)...`;
@@ -184,10 +277,21 @@
       const res = await fetch('/api/generate-scene', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, scene_number: currentScene, user_input: input })
+        body: JSON.stringify({ show_id: showId, scene_number: currentScene, user_input: input, parent_approved })
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
+
+      if (data.needs_approval) {
+        document.getElementById('loading-draw-area').style.display = 'none';
+        status.textContent = '⏸ Waiting for parent approval...';
+        document.getElementById('approval-reason').textContent = `Reason: ${data.reason}`;
+        document.getElementById('approval-overlay').style.display = 'flex';
+        narrate('A parent needs to check this before we continue.');
+        pendingApproval = (approved) => { if (approved) generateScene(true); };
+        btn.disabled = false;
+        return;
+      }
 
       scenes.push(data);
       document.getElementById('loading-draw-area').style.display = 'none';
@@ -310,12 +414,31 @@
     newAudio.loop = true;
     currentLyriaAudio = newAudio;
     newVideo.addEventListener('play', () => { newAudio.currentTime = newVideo.currentTime % newAudio.duration || 0; newAudio.play(); });
-    newVideo.addEventListener('pause', () => newAudio.pause());
+    newVideo.addEventListener('pause', () => { if (!newVideo.ended) newAudio.pause(); });
     newVideo.addEventListener('seeked', () => { newAudio.currentTime = newVideo.currentTime % newAudio.duration || 0; });
   }
 
   function stopLyria() {
     if (currentLyriaAudio) { currentLyriaAudio.pause(); currentLyriaAudio.loop = false; }
+  }
+
+  function fadeOutLyria(durationMs = 1500) {
+    if (!currentLyriaAudio) return;
+    const audio = currentLyriaAudio;
+    const startVol = audio.volume;
+    const steps = 30;
+    const interval = durationMs / steps;
+    let step = 0;
+    const fade = setInterval(() => {
+      step++;
+      audio.volume = Math.max(0, startVol * (1 - step / steps));
+      if (step >= steps) {
+        clearInterval(fade);
+        audio.pause();
+        audio.loop = false;
+        audio.volume = 1;
+      }
+    }, interval);
   }
 
   // ── Narrator (Gemini TTS) ────────────────────────────────────────────────
