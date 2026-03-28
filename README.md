@@ -14,6 +14,7 @@ Built at a hackathon using Google's Veo 3, Lyria, Gemini Flash, and Gemini Live 
 4. **For each of 3 scenes**, the child describes what happens — the app generates an 8-second animated video clip (Veo 3) and matching background music (Lyria) from that description
 5. *
 
+
 *While each clip generates** (~1 minute), the child can draw additional characters or objects to add to the next scene
 6. **A voice moment** pops up before generation — e.g. "Make the sound your character would make!" — and the child's voice gets embedded as a speech bubble in the video
 7. **A finale screen** plays all three scenes back-to-back with a narrated closing line: *"The End! What a magical story!"*

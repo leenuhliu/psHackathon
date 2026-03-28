@@ -355,7 +355,7 @@
     try {
       const res = await fetch('/api/generate-challenge', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, scene_number: 1, story_name: answers.storyName, character_traits: characterTraits })
+        body: JSON.stringify({ show_id: showId, scene_number: 1, story_name: workingStoryName(), character_traits: characterTraits, story_context: buildStoryContext() })
       });
       const data = await res.json();
       displayChallenge(data);
@@ -676,8 +676,9 @@
         body: JSON.stringify({
           show_id: showId, scene_number: currentScene, solution,
           challenge_text: currentChallenge?.challenge_text || '',
-          story_name: answers.storyName,
-          parent_approved, character_traits: characterTraits
+          story_name: workingStoryName(),
+          parent_approved, character_traits: characterTraits,
+          story_context: buildStoryContext()
         })
       });
       const { job_id, error: startErr } = await startRes.json();
@@ -703,6 +704,7 @@
             showVoiceMoment(vpData.voice_prompt),
             new Promise(r => setTimeout(() => r(null), 25000))
           ]);
+          skipVoiceMoment(); // stop any still-running recording after auto-skip or completion
         }
       } catch (_) {}
 
