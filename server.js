@@ -80,6 +80,24 @@ app.post('/api/episode', async (req, res) => {
   res.json(episode);
 });
 
+// P1 calls this to generate a background music track via MusicGen
+app.post('/api/generate-track', async (req, res) => {
+  const { lyria_prompt = 'calm gentle instrumental, children\'s animated show, slow pacing' } = req.body;
+
+  const output = await replicate.run(
+    'lucataco/ace-step:280fc4f9ee507577f880a167f639c02622421d8fecf492454320311217b688f1',
+    {
+      input: {
+        prompt: lyria_prompt,
+        duration: 30,
+      }
+    }
+  );
+
+  const lyria_track_url = typeof output === 'string' ? output : output?.url?.() ?? String(output);
+  res.json({ lyria_track_url });
+});
+
 // P1 calls this to transform a doodle into a styled character frame
 app.post('/api/style-character', async (req, res) => {
   const { doodle_url, description = '' } = req.body;
