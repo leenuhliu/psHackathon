@@ -666,19 +666,28 @@
     // Start polling immediately — status display updates live from here
     const resultPromise = pollSceneJob(job_id, status);
 
-    // Concurrently fetch voice prompt + show voice moment while pipeline warms up
+    // Fetch voice prompt with a hard 8s timeout, then show voice moment
+    // with a 25s auto-skip — so Veo is ALWAYS unblocked no matter what.
     try {
+      const vpAbort = new AbortController();
+      const vpTimer = setTimeout(() => vpAbort.abort(), 8000);
       const vpRes = await fetch('/api/scene-voice-prompt', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, user_input: solution })
+        body: JSON.stringify({ show_id: showId, user_input: solution }),
+        signal: vpAbort.signal
       });
+      clearTimeout(vpTimer);
       const vpData = await vpRes.json();
       if (vpData.voice_prompt) {
-        capturedVoiceResponse = await showVoiceMoment(vpData.voice_prompt);
+        // Race: child responds OR 25s passes — either way we move on
+        capturedVoiceResponse = await Promise.race([
+          showVoiceMoment(vpData.voice_prompt),
+          new Promise(r => setTimeout(() => r(null), 25000))
+        ]);
       }
     } catch (_) {}
 
-    // Deliver voice response — unblocks Veo in the pipeline
+    // Always deliver voice response — unblocks Veo whether child responded or not
     fetch(`/api/scene-voice-response/${job_id}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ voice_response: capturedVoiceResponse })
@@ -783,6 +792,12 @@
           }
         } catch (e) { clearInterval(poll); reject(e); }
       }, 2000);
+
+      // Hard 10-minute client-side timeout — never hang forever
+      setTimeout(() => {
+        clearInterval(poll);
+        reject(new Error('Timed out after 10 minutes. The server may be busy — please try again.'));
+      }, 10 * 60 * 1000);
     });
   }
 
