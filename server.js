@@ -64,6 +64,27 @@ async function initDb() {
   console.log('DB ready');
 }
 
+// Rename a story (updates all episodes' show record via world_state)
+app.patch('/api/story/:showId', async (req, res, next) => { try {
+  const { showId } = req.params;
+  const { story_name } = req.body;
+  await sql`
+    INSERT INTO world_state (show_id, key, value, last_updated)
+    VALUES (${showId}, 'story_name', ${JSON.stringify(story_name)}, now())
+    ON CONFLICT (show_id, key) DO UPDATE SET value = EXCLUDED.value, last_updated = now()
+  `;
+  res.json({ ok: true });
+} catch (e) { next(e); } });
+
+// Delete a story and all its episodes/characters
+app.delete('/api/story/:showId', async (req, res, next) => { try {
+  const { showId } = req.params;
+  await sql`DELETE FROM episodes WHERE show_id = ${showId}`;
+  await sql`DELETE FROM characters WHERE show_id = ${showId}`;
+  await sql`DELETE FROM world_state WHERE show_id = ${showId}`;
+  res.json({ ok: true });
+} catch (e) { next(e); } });
+
 // P3 calls this to load the show bible sidebar
 app.get('/api/show-bible', async (req, res) => {
   const { show_id } = req.query;
@@ -268,6 +289,58 @@ app.post('/api/narrate', async (req, res, next) => { try {
   res.send(wav);
 } catch (e) { next(e); } });
 
+// Shared helper: generate a challenge/encounter for the given scene
+async function buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name }) {
+  const sceneLabel = scene_number >= 3
+    ? 'Scene 3, the grand finale — make this feel like a big satisfying conclusion encounter'
+    : `Scene ${scene_number} of 3${scene_number > 1 ? ' — raise the stakes a little from the previous scene' : ''}`;
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{ role: 'user', parts: [{ text: `You are a master storyteller for a children's interactive story app (ages 4–10).
+
+Story name: "${story_name || 'Our Story'}"
+${characterContext}
+${traitContext}
+${storyHistory}
+
+Generate an exciting, age-appropriate CHALLENGE or ENCOUNTER for ${sceneLabel}.
+
+Rules:
+- Match the genre/setting already established (fantasy → magic problems, school → social/creative challenges, adventure → physical obstacles, etc.)
+- Pose ONE clear, vivid problem that the child (as the hero) must solve creatively — a blocked path, a creature that needs help, a mystery, a locked door, a character who is sad, etc.
+- The challenge should feel like a direct consequence of or natural continuation from the story so far
+- Frame it in second-person, addressing the child directly ("You and [name] are walking when suddenly...")
+- 2–3 sentences max, full of sensory detail and drama
+- The child's creative answer will determine what actually happens in the animated scene
+
+Respond with ONLY valid JSON:
+{
+  "challenge_text": "Full vivid challenge addressed to the child",
+  "challenge_short": "5–8 word dramatic summary (e.g. 'A giant spider guards the bridge!')"
+}` }] }],
+    config: { responseMimeType: 'application/json' }
+  });
+  return JSON.parse(result.text);
+}
+
+// Called after character questions to get the first scene's challenge
+app.post('/api/generate-challenge', async (req, res, next) => { try {
+  const { show_id, scene_number = 1, story_name = '', character_traits } = req.body;
+  const chars = await sql`SELECT name, description FROM characters WHERE show_id = ${show_id}`;
+  const episodes = await sql`SELECT episode_number, title, story_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`;
+  const characterContext = chars.length
+    ? `Characters: ${chars.map(c => `${c.name} (${c.description})`).join(', ')}.`
+    : 'No characters yet.';
+  const traitContext = character_traits && Object.keys(character_traits).length
+    ? `Character traits: ${Object.entries(character_traits).map(([k, v]) => `${k}: "${v}"`).join('; ')}.`
+    : '';
+  const storyHistory = episodes.length
+    ? `Previous scenes: ${episodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ')}`
+    : 'This is the very first scene.';
+  const challenge = await buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name });
+  res.json(challenge);
+} catch (e) { next(e); } });
+
 // Quick call: returns a fun character-specific voice prompt for the child
 app.post('/api/scene-voice-prompt', async (req, res, next) => { try {
   const { show_id, user_input } = req.body;
@@ -285,10 +358,10 @@ Respond with ONLY valid JSON: { "voice_prompt": "...", "sound_label": "a short l
   res.json(JSON.parse(result.text));
 } catch (e) { next(e); } });
 
-// Core pipeline: user input → Gemini prompts → Veo video
+// Core pipeline: child's creative solution → Gemini prompts → Veo video
 app.post('/api/generate-scene', async (req, res, next) => { try {
-  const { show_id, scene_number, user_input, parent_approved, voice_response, character_traits } = req.body;
-  if (!show_id || !user_input) return res.status(400).json({ error: 'show_id and user_input required' });
+  const { show_id, scene_number, solution, challenge_text, story_name, parent_approved, voice_response, character_traits } = req.body;
+  if (!show_id || !solution) return res.status(400).json({ error: 'show_id and solution required' });
 
   // Content moderation — skip if parent already approved
   if (!parent_approved) {
@@ -296,7 +369,7 @@ app.post('/api/generate-scene', async (req, res, next) => { try {
       model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: `You are a content moderator for a children's storytelling app for ages 3-10. Assess whether the following story input is appropriate for young children. Flag it if it contains any violence, scary themes, adult content, strong language, or anything PG-13 or above.
 
-Input: "${user_input}"
+Input: "${solution}"
 
 Respond with ONLY valid JSON: { "flagged": true/false, "reason": "brief reason if flagged, otherwise null" }` }] }],
       config: { responseMimeType: 'application/json' }
@@ -327,22 +400,29 @@ Respond with ONLY valid JSON: { "flagged": true/false, "reason": "brief reason i
     ? `Previous scenes: ${prevEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ')}`
     : 'This is the first scene.';
 
-  // Ask Gemini to build the scene prompt + next guidance
+  // Ask Gemini to build the scene showing the child's solution succeeding
+  const challengeContext = challenge_text
+    ? `The challenge the child was given: "${challenge_text}"\nThe child's creative solution: "${solution}"`
+    : `The child's idea for the scene: "${solution}"`;
+
   const result = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
     contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
+Story name: "${story_name || 'Our Story'}"
 ${characterContext}
 ${traitContext}
 ${storyHistory}
 
-The child/parent just said: "${user_input}"
+${challengeContext}
 
-This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
+This is scene ${scene_number} of 3. The child's solution must be shown WORKING — their idea succeeds in a satisfying, fun way. The animation celebrates their creativity.
+
+Respond with ONLY valid JSON:
 {
-  "veo_prompt": "Detailed cinematic scene description for Veo 3. Richly colored hand-drawn animation style with vibrant fully-painted backgrounds, warm and slow-paced, 8 seconds. Include the character visually in the scene. In the very last half-second, red velvet theatrical curtains snap shut quickly from both sides, ending frozen on closed curtains with 'Scene End' in a warm storybook font in the center — this must be the very last frame.",
-  "lyria_prompt": "Music prompt for Lyria. Warm, gentle, children's animated tone.",
+  "veo_prompt": "Detailed cinematic scene description for Veo 3. Richly colored hand-drawn animation style with vibrant fully-painted backgrounds, warm and slow-paced, 8 seconds. Show the child's solution working triumphantly. Include the character visually. In the very last half-second, red velvet theatrical curtains snap shut quickly from both sides, ending frozen on closed curtains with 'Scene End' in a warm storybook font — this must be the very last frame.",
+  "lyria_prompt": "Music prompt for Lyria. Warm, gentle, children's animated tone that matches the emotional beat of the solution succeeding.",
   "episode_title": "Short fun title for this scene",
-  "next_prompt": "A warm, one-sentence question to ask the child to inspire scene ${scene_number + 1}. ${scene_number >= 3 ? 'This is the last scene, so say something celebratory instead.' : ''}",
+  "story_prompt_summary": "One sentence describing what happened (for story continuity context in future scenes)",
   "closing_line": ${scene_number >= 3 ? '"The End! What a [pick ONE vivid adjective perfectly matching the mood and events of this specific story — e.g. magical, daring, silly, heartwarming, adventurous] story!"' : 'null'}
 }` }] }],
     config: { responseMimeType: 'application/json' }
@@ -390,22 +470,27 @@ This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
   const audio_url = `/generated/${audioFilename}`;
 
   // Save episode to DB
-  const [episode] = await sql`
-    INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url)
-    VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${prompts.veo_prompt}, ${video_url}, ${audio_url})
-    ON CONFLICT DO NOTHING
-    RETURNING *
-  `;
-
-  // Save next_prompt to world state for the frontend to display
+  const storyPromptSummary = prompts.story_prompt_summary || solution;
   await sql`
-    INSERT INTO world_state (show_id, key, value, last_updated)
-    VALUES (${show_id}, 'next_prompt', ${JSON.stringify(prompts.next_prompt)}, now())
-    ON CONFLICT (show_id, key)
-    DO UPDATE SET value = EXCLUDED.value, last_updated = now()
+    INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url)
+    VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${storyPromptSummary}, ${video_url}, ${audio_url})
+    ON CONFLICT DO NOTHING
   `;
 
-  res.json({ video_url, audio_url, episode_title: prompts.episode_title, next_prompt: prompts.next_prompt, closing_line: prompts.closing_line || null });
+  // Generate the next challenge (scenes 1 and 2 only)
+  let next_challenge = null;
+  if (scene_number < 3) {
+    const updatedEpisodes = await sql`
+      SELECT episode_number, title, story_prompt FROM episodes
+      WHERE show_id = ${show_id} ORDER BY episode_number ASC
+    `;
+    const updatedHistory = updatedEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ');
+    next_challenge = await buildChallenge(scene_number + 1, {
+      characterContext, traitContext, storyHistory: updatedHistory, story_name: story_name || ''
+    });
+  }
+
+  res.json({ video_url, audio_url, episode_title: prompts.episode_title, next_challenge, closing_line: prompts.closing_line || null });
 } catch (e) { next(e); } });
 
 // Return JSON for any unhandled errors instead of Express HTML

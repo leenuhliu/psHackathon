@@ -27,7 +27,10 @@
     @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
     .fade-in { animation: fadeSlideIn 0.6s ease forwards; opacity: 0; }
     .story-card { display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border:1px solid #e0e0e0;border-radius:6px;margin-bottom:8px;background:#fafafa;font-size:13px; }
-    .story-card button { padding:6px 12px;font-size:12px; }
+    .story-card .card-actions { display:flex;gap:6px;flex-shrink:0; }
+    .story-card button { padding:5px 10px;font-size:12px; }
+    .story-card .btn-danger { color:#c00;border-color:#fcc; }
+    .rename-input { width:100%;padding:4px 8px;font-size:13px;border:1px solid #aaa;border-radius:4px;margin-top:4px;box-sizing:border-box; }
   </style>
 </head>
 <body>
@@ -101,12 +104,20 @@
 <div class="screen" id="screen-scene">
   <h2 id="scene-heading">Scene 1 of 3</h2>
 
-  <div class="hint-box" id="next-prompt-display" style="display:none;"></div>
+  <!-- Challenge/encounter box -->
+  <div id="challenge-box" style="display:none;background:linear-gradient(135deg,#fff9e6,#fff0cc);border:2px solid #f4d03f;border-radius:10px;padding:16px 20px;margin-bottom:16px;">
+    <div style="font-size:11px;font-weight:bold;color:#b8860b;letter-spacing:1px;margin-bottom:8px;">⚡ YOUR CHALLENGE</div>
+    <div id="challenge-text" style="font-size:1.05rem;line-height:1.55;color:#333;"></div>
+  </div>
+  <!-- Loading challenge state -->
+  <div id="challenge-loading" style="display:none;text-align:center;padding:20px 0;color:#888;font-size:14px;">
+    <span class="loader"></span>Crafting your adventure...
+  </div>
 
-  <label>What happens in this scene?</label>
-  <textarea id="scene-input" rows="3" placeholder="e.g. Blobby wanders into an enchanted forest and finds a glowing mushroom"></textarea>
+  <label id="solution-label" style="display:none;">💡 What does your character do?</label>
+  <textarea id="scene-input" rows="3" placeholder="e.g. I cast a shrinking spell on the tree!" style="display:none;"></textarea>
 
-  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
+  <div id="scene-controls" style="display:none;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px;">
     <button class="primary" onclick="generateScene()" id="btn-generate">Generate Scene 1</button>
     <button onclick="toggleVoice()" id="btn-voice">🎤 Voice</button>
     <span id="voice-indicator" style="font-size:12px;color:#c00;"></span>
@@ -183,6 +194,7 @@
   let characterTraits = {};
   let charQStep = 0;
   let charQVoiceRec = null;
+  let currentChallenge = null;
 
   // ── Question flow (story name → character name) ──────────────────────────
   const QUESTIONS = [
@@ -292,14 +304,59 @@
     if (charQStep < CHAR_Q_TEMPLATES.length) {
       askCharQ();
     } else {
-      narrate(`Wonderful! Now let's build your first scene.`);
+      narrate(`Wonderful! Your adventure is about to begin...`);
       show('screen-scene');
+      loadFirstChallenge();
     }
   }
 
   function skipCharQs() {
     stopCharQVoice();
     show('screen-scene');
+    loadFirstChallenge();
+  }
+
+  async function loadFirstChallenge() {
+    showChallengeLoading(true);
+    try {
+      const res = await fetch('/api/generate-challenge', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_id: showId, scene_number: 1, story_name: answers.storyName, character_traits: characterTraits })
+      });
+      const data = await res.json();
+      displayChallenge(data);
+    } catch (e) {
+      showChallengeLoading(false);
+      revealSolutionInput();
+    }
+  }
+
+  function displayChallenge(challenge) {
+    showChallengeLoading(false);
+    currentChallenge = challenge;
+    document.getElementById('challenge-text').textContent = challenge.challenge_text;
+    document.getElementById('challenge-box').style.display = 'block';
+    narrate(challenge.challenge_text);
+    revealSolutionInput();
+  }
+
+  function showChallengeLoading(on) {
+    document.getElementById('challenge-loading').style.display = on ? 'block' : 'none';
+    document.getElementById('challenge-box').style.display = 'none';
+    if (on) hideSolutionInput();
+  }
+
+  function revealSolutionInput() {
+    document.getElementById('solution-label').style.display = 'block';
+    document.getElementById('scene-input').style.display = 'block';
+    document.getElementById('scene-controls').style.display = 'flex';
+    document.getElementById('scene-input').focus();
+  }
+
+  function hideSolutionInput() {
+    document.getElementById('solution-label').style.display = 'none';
+    document.getElementById('scene-input').style.display = 'none';
+    document.getElementById('scene-controls').style.display = 'none';
   }
 
   function toggleCharQVoice() {
@@ -338,15 +395,80 @@
     const stories = JSON.parse(localStorage.getItem(STORIES_KEY) || '[]');
     if (!stories.length) return;
     const section = document.getElementById('past-stories-section');
-    const list = document.getElementById('past-stories-list');
     section.style.display = 'block';
-    list.innerHTML = stories.map(s => {
+    renderStoryList(stories);
+  }
+
+  function renderStoryList(stories) {
+    const list = document.getElementById('past-stories-list');
+    if (!stories.length) {
+      list.innerHTML = '<p style="color:#aaa;font-size:13px;">No stories yet.</p>';
+      return;
+    }
+    list.innerHTML = stories.map((s, i) => {
       const date = new Date(s.timestamp).toLocaleDateString();
-      return `<div class="story-card">
-        <span><strong>${s.storyName || 'Untitled Story'}</strong> <span style="color:#aaa;font-size:11px;">${date}</span></span>
-        <button onclick="revisitStory('${s.showId}', '${(s.storyName || '').replace(/'/g, "\\'")}')">Watch ▶</button>
+      const safeName = (s.storyName || 'Untitled Story').replace(/'/g, "\\'");
+      return `<div class="story-card" id="story-card-${i}">
+        <div style="flex:1;min-width:0;">
+          <strong id="story-name-${i}">${s.storyName || 'Untitled Story'}</strong>
+          <span style="color:#aaa;font-size:11px;margin-left:8px;">${date}</span>
+        </div>
+        <div class="card-actions">
+          <button onclick="revisitStory('${s.showId}', '${safeName}')">▶ Watch</button>
+          <button onclick="exportStory('${s.showId}', '${safeName}')">⬇ Export</button>
+          <button onclick="renameStory(${i})">✏ Rename</button>
+          <button class="btn-danger" onclick="deleteStory('${s.showId}', ${i})">✕</button>
+        </div>
       </div>`;
     }).join('');
+  }
+
+  async function renameStory(index) {
+    const stories = JSON.parse(localStorage.getItem(STORIES_KEY) || '[]');
+    const s = stories[index];
+    const newName = prompt('New story name:', s.storyName || '');
+    if (!newName || newName === s.storyName) return;
+    stories[index].storyName = newName;
+    localStorage.setItem(STORIES_KEY, JSON.stringify(stories));
+    // Persist to DB
+    fetch(`/api/story/${s.showId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ story_name: newName })
+    }).catch(() => {});
+    renderStoryList(stories);
+  }
+
+  async function deleteStory(showId, index) {
+    if (!confirm('Delete this story? This cannot be undone.')) return;
+    const stories = JSON.parse(localStorage.getItem(STORIES_KEY) || '[]');
+    stories.splice(index, 1);
+    localStorage.setItem(STORIES_KEY, JSON.stringify(stories));
+    // Delete from DB
+    fetch(`/api/story/${showId}`, { method: 'DELETE' }).catch(() => {});
+    if (stories.length) {
+      renderStoryList(stories);
+    } else {
+      document.getElementById('past-stories-section').style.display = 'none';
+    }
+  }
+
+  async function exportStory(showId, storyName) {
+    try {
+      const res = await fetch(`/api/show-bible?show_id=${showId}`);
+      const data = await res.json();
+      if (!data.episodes.length) { alert('No scenes to export yet.'); return; }
+      // Open each video clip in a new tab for download
+      data.episodes.forEach((ep, i) => {
+        const a = document.createElement('a');
+        a.href = ep.veo_clip_url;
+        a.download = `${storyName || 'story'}-scene-${ep.episode_number}.mp4`;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        setTimeout(() => { a.click(); document.body.removeChild(a); }, i * 500);
+      });
+    } catch (err) {
+      alert('Export failed: ' + err.message);
+    }
   }
 
   async function revisitStory(id, name) {
@@ -486,8 +608,8 @@
   }
 
   async function generateScene(parent_approved = false) {
-    const input = document.getElementById('scene-input').value.trim();
-    if (!input) return alert('Describe the scene');
+    const solution = document.getElementById('scene-input').value.trim();
+    if (!solution) return alert('What does your character do?');
     const btn = document.getElementById('btn-generate');
     const status = document.getElementById('scene-status');
     btn.disabled = true;
@@ -500,7 +622,7 @@
     try {
       const vpRes = await fetch('/api/scene-voice-prompt', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, user_input: input })
+        body: JSON.stringify({ show_id: showId, user_input: solution })
       });
       const vpData = await vpRes.json();
       if (vpData.voice_prompt) {
@@ -509,14 +631,22 @@
     } catch (_) {}
 
     document.getElementById('voice-moment').style.display = 'none';
+    hideSolutionInput();
+    document.getElementById('challenge-box').style.display = 'none';
     document.getElementById('loading-draw-area').style.display = 'block';
-    status.innerHTML = `<span class="loader"></span>Generating scene ${currentScene} with Veo (~1 min)...`;
+    status.innerHTML = `<span class="loader"></span>Animating your solution (~1 min)...`;
 
     try {
       const res = await fetch('/api/generate-scene', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, scene_number: currentScene, user_input: input, parent_approved, voice_response: capturedVoiceResponse, character_traits: characterTraits })
+        body: JSON.stringify({
+          show_id: showId, scene_number: currentScene, solution,
+          challenge_text: currentChallenge?.challenge_text || '',
+          story_name: answers.storyName,
+          parent_approved, voice_response: capturedVoiceResponse,
+          character_traits: characterTraits
+        })
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -529,6 +659,7 @@
         narrate('A parent needs to check this before we continue.');
         pendingApproval = (approved) => { if (approved) generateScene(true); };
         btn.disabled = false;
+        revealSolutionInput();
         return;
       }
 
@@ -536,7 +667,6 @@
       document.getElementById('loading-draw-area').style.display = 'none';
       document.getElementById('scene-title').textContent = data.episode_title;
       syncAudioToVideo(data.video_url, data.audio_url);
-      document.getElementById('scene-next-hint').textContent = data.next_prompt || '';
       document.getElementById('scene-result').style.display = 'block';
       status.textContent = `✓ Scene ${currentScene} ready!`;
 
@@ -545,11 +675,11 @@
         document.getElementById('scene-heading').textContent = `Scene ${currentScene} of ${TOTAL_SCENES}`;
         document.getElementById('btn-generate').textContent = `Generate Scene ${currentScene}`;
         document.getElementById('scene-input').value = '';
-        if (data.next_prompt) {
-          const hint = document.getElementById('next-prompt-display');
-          hint.textContent = `💬 ${data.next_prompt}`;
-          hint.style.display = 'block';
-          narrate(data.next_prompt);
+        // Show the next challenge that came back with the scene response
+        if (data.next_challenge) {
+          displayChallenge(data.next_challenge);
+        } else {
+          revealSolutionInput();
         }
         btn.disabled = false;
       } else {
@@ -560,6 +690,7 @@
       status.className = 'status error';
       status.textContent = `Error: ${e.message}`;
       document.getElementById('loading-draw-area').style.display = 'none';
+      revealSolutionInput();
       btn.disabled = false;
     }
   }
