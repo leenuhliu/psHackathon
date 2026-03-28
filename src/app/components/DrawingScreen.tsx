@@ -21,6 +21,7 @@ export function DrawingScreen() {
   const location = useLocation();
   const navigate = useNavigate();
   const storyDetails = location.state?.storyDetails || [];
+  const charNameFromState: string = location.state?.charName || storyDetails[1] || '';
   
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -258,7 +259,7 @@ export function DrawingScreen() {
         // Use the character name from the story the child described (storyDetails[1]),
         // falling back to the stage label if not available
         const charNames = [
-          storyDetails[1] || stages[0].label,
+          charNameFromState || stages[0].label,
           storyDetails[3] || stages[1].label,
         ];
 
@@ -285,7 +286,7 @@ export function DrawingScreen() {
         setIsProcessing(false);
 
         const newStory = {
-          id: Date.now().toString(),
+          id: showId,
           date: new Date().toISOString(),
           drawings: newSavedDrawings,
           title: storyDetails.length > 0 ? `Story: ${storyDetails[0]}` : 'My Adventure',
@@ -293,7 +294,15 @@ export function DrawingScreen() {
         const existingStories = JSON.parse(localStorage.getItem('tell-a-sketch-stories') || '[]');
         localStorage.setItem('tell-a-sketch-stories', JSON.stringify([newStory, ...existingStories]));
 
-        navigate('/viewing', { state: { savedDrawings: newSavedDrawings, storyDetails, showId } });
+        navigate('/viewing', {
+          state: {
+            savedDrawings: newSavedDrawings,
+            storyDetails,
+            showId,
+            charName: location.state?.charName,
+            characterTraits: location.state?.characterTraits,
+          },
+        });
       }
     }
   };

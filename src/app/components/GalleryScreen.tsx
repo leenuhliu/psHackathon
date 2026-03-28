@@ -1,6 +1,6 @@
 import { motion } from 'motion/react';
 import { useNavigate } from 'react-router';
-import { Home, Trash2, Play, Plus } from 'lucide-react';
+import { Home, Trash2, Play, Plus, Download } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
 interface SavedStory {
@@ -13,6 +13,8 @@ interface SavedStory {
 export function GalleryScreen() {
   const navigate = useNavigate();
   const [stories, setStories] = useState<SavedStory[]>([]);
+  const [exportingId, setExportingId] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     const saved = localStorage.getItem('tell-a-sketch-stories');
@@ -27,9 +29,28 @@ export function GalleryScreen() {
     localStorage.setItem('tell-a-sketch-stories', JSON.stringify(newStories));
   };
 
-  const handleContinue = (story: SavedStory) => {
-    // Continue from this story - for now just view it
-    navigate('/viewing', { state: { savedDrawings: story.drawings } });
+  const handleView = (story: SavedStory) => {
+    navigate('/viewing', { state: { savedDrawings: story.drawings, showId: story.id } });
+  };
+
+  const handleExport = async (story: SavedStory) => {
+    setExportingId(story.id);
+    setExportError(null);
+    try {
+      const res = await fetch(`/api/export-story/${story.id}`);
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      const a = document.createElement('a');
+      a.href = data.url;
+      a.download = `${story.title || 'my-story'}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    } catch (e: any) {
+      setExportError(e.message || 'Export failed');
+    } finally {
+      setExportingId(null);
+    }
   };
 
   return (
@@ -45,13 +66,15 @@ export function GalleryScreen() {
           <Home className="w-5 h-5" />
           Home
         </motion.button>
-        
+
         <h2 className="text-4xl font-bold text-[#FF6B6B] flex-1 text-center" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
           My Sketch Gallery 🎨
         </h2>
-        
-        
       </div>
+
+      {exportError && (
+        <p className="text-red-500 text-sm mb-4 text-center">{exportError}</p>
+      )}
 
       {stories.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-6">
@@ -82,32 +105,45 @@ export function GalleryScreen() {
                 className="bg-white border-8 border-yellow-400 rounded-3xl shadow-xl overflow-hidden flex flex-col"
               >
                 {/* Preview image (first drawing) */}
-                <div className="aspect-[4/3] bg-gray-100 relative group cursor-pointer" onClick={() => handleContinue(story)}>
+                <div className="aspect-[4/3] bg-gray-100 relative group cursor-pointer" onClick={() => handleView(story)}>
                   <img src={story.drawings[0]} alt="Sketch" className="w-full h-full object-cover" />
                   <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                     <Play className="w-16 h-16 text-white" fill="white" />
                   </div>
                 </div>
-                
+
                 <div className="p-4 flex flex-col gap-2">
                   <h3 className="text-xl font-bold text-gray-800" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
                     {story.title || "My Adventure"}
                   </h3>
                   <p className="text-sm text-gray-500">{new Date(story.date).toLocaleDateString()}</p>
-                  
-                  <div className="flex justify-between items-center mt-2">
+
+                  <div className="flex justify-between items-center mt-2 gap-2">
                     <motion.button
                       whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.95 }}
-                      onClick={() => handleContinue(story)}
-                      className="bg-[#4ECDC4] text-white px-4 py-2 rounded-full font-bold flex items-center gap-2"
+                      onClick={() => handleView(story)}
+                      className="bg-[#4ECDC4] text-white px-4 py-2 rounded-full font-bold flex items-center gap-1 text-sm"
+                      style={{ fontFamily: 'Comic Sans MS, cursive' }}
                     >
                       <Play className="w-4 h-4" />
-                      View
+                      Watch
                     </motion.button>
-                    
+
                     <motion.button
-                      whileHover={{ scale: 1.05, color: '#FF0000' }}
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => handleExport(story)}
+                      disabled={exportingId === story.id}
+                      className="bg-[#FFD93D] text-gray-800 px-4 py-2 rounded-full font-bold flex items-center gap-1 text-sm disabled:opacity-50"
+                      style={{ fontFamily: 'Comic Sans MS, cursive' }}
+                    >
+                      <Download className="w-4 h-4" />
+                      {exportingId === story.id ? '...' : 'Export'}
+                    </motion.button>
+
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.95 }}
                       onClick={() => handleDelete(story.id)}
                       className="p-2 text-gray-400 hover:bg-red-50 rounded-full transition-colors"
@@ -123,18 +159,9 @@ export function GalleryScreen() {
       )}
 
       <style>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 12px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: #f1f1f1;
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: #FFD93D;
-          border-radius: 10px;
-          border: 3px solid #f1f1f1;
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 12px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #FFD93D; border-radius: 10px; border: 3px solid #f1f1f1; }
       `}</style>
     </div>
   );

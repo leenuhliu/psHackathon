@@ -23,7 +23,8 @@ mkdirSync(join(__dirname, 'public', 'generated'), { recursive: true });
 const app = express();
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static('dist'));
+app.use('/generated', express.static('public/generated'));
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY });
 
@@ -780,6 +781,9 @@ wss.on('connection', async (ws) => {
 
   ws.on('close', () => { try { session.close(); } catch (_) {} });
 });
+
+// SPA fallback — serve React app for all non-API routes
+app.get('/{*path}', (req, res) => res.sendFile(join(__dirname, 'dist', 'index.html')));
 
 initDb().then(() => {
   const PORT = process.env.PORT || 3001;

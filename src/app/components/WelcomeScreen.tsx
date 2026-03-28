@@ -3,13 +3,14 @@ import { useNavigate } from 'react-router';
 import { StoryGuide } from './StoryGuide';
 import { Sparkles, Image as ImageIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
+import { useNarration } from '../hooks/useNarration';
 
 export function WelcomeScreen() {
   const navigate = useNavigate();
   const [showContent, setShowContent] = useState(false);
+  useNarration("Hi there! I'm Simon the Story Star! Let's create an amazing story together!");
 
   useEffect(() => {
-    // Show content after initial animation
     const timer = setTimeout(() => setShowContent(true), 500);
     return () => clearTimeout(timer);
   }, []);

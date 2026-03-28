@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router';
 import { StoryGuide } from './StoryGuide';
 import { ArrowLeft } from 'lucide-react';
 import { ImageWithFallback } from './figma/ImageWithFallback';
+import { useNarration } from '../hooks/useNarration';
 
 interface StoryTemplate {
   id: string;
@@ -103,6 +104,7 @@ const storyTemplates: StoryTemplate[] = [
 
 export function StorylineSelectionScreen() {
   const navigate = useNavigate();
+  useNarration("Pick a story adventure! Tap on any one you like!");
 
   const handleStorySelect = (story: StoryTemplate) => {
     // Navigate to drawing with predefined story details

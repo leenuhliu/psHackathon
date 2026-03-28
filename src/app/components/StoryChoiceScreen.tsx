@@ -2,9 +2,11 @@ import { motion } from 'motion/react';
 import { useNavigate } from 'react-router';
 import { StoryGuide } from './StoryGuide';
 import { BookOpen, Sparkles, ArrowLeft } from 'lucide-react';
+import { useNarration } from '../hooks/useNarration';
 
 export function StoryChoiceScreen() {
   const navigate = useNavigate();
+  useNarration("Great! Now, how would you like to create your story?");
 
   return (
     <div className="size-full bg-white flex flex-col items-center justify-center p-12 overflow-hidden">
