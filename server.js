@@ -95,45 +95,6 @@ app.post('/api/episode', async (req, res) => {
   res.json(episode);
 });
 
-// P1 calls this to generate a background music track via MusicGen
-app.post('/api/generate-track', async (req, res) => {
-  const { lyria_prompt = 'calm gentle instrumental, children\'s animated show, slow pacing' } = req.body;
-
-  const output = await replicate.run(
-    'lucataco/ace-step:280fc4f9ee507577f880a167f639c02622421d8fecf492454320311217b688f1',
-    {
-      input: {
-        prompt: lyria_prompt,
-        duration: 30,
-      }
-    }
-  );
-
-  const lyria_track_url = typeof output === 'string' ? output : output?.url?.() ?? String(output);
-  res.json({ lyria_track_url });
-});
-
-// P1 calls this to transform a doodle into a styled character frame
-app.post('/api/style-character', async (req, res) => {
-  const { doodle_url, description = '' } = req.body;
-  const output = await replicate.run(
-    'jagilley/controlnet-scribble:435061a1b5a4c1e26740464bf786efdfa9cb3a3ac488595a2de23e143fdb0117',
-    {
-      input: {
-        image: doodle_url,
-        prompt: `hand-drawn cartoon character, ${description}, clean line art, flat color, sticker style, white background`,
-        num_samples: '1',
-        image_resolution: '512',
-        ddim_steps: 20,
-        scale: 9,
-        eta: 0,
-      }
-    }
-  );
-  const styled_frame_url = Array.isArray(output) ? output[0] : output;
-  res.json({ styled_frame_url });
-});
-
 // P1 calls this after character assets are ready
 app.post('/api/character', async (req, res) => {
   const { show_id, name, description, doodle_url, styled_frame_url } = req.body;
