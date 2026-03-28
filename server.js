@@ -307,9 +307,26 @@ app.post('/api/narrate', async (req, res, next) => { try {
   res.send(wav);
 } catch (e) { next(e); } });
 
+// Quick call: returns a fun character-specific voice prompt for the child
+app.post('/api/scene-voice-prompt', async (req, res, next) => { try {
+  const { show_id, user_input } = req.body;
+  const chars = await sql`SELECT name, description FROM characters WHERE show_id = ${show_id}`;
+  const charList = chars.map(c => `${c.name} (${c.description})`).join(', ') || 'a character';
+  const result = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: [{ role: 'user', parts: [{ text: `You are making a children's story app. The child's characters are: ${charList}. The scene they described: "${user_input}".
+
+Generate ONE short, playful, specific voice prompt asking the child to make a sound or say something as their character. It should be tied to the specific character and scene (e.g. if they have a dinosaur, ask them to roar; if a princess, ask what she'd say to a dragon). Keep it to one sentence, fun, and low-pressure.
+
+Respond with ONLY valid JSON: { "voice_prompt": "...", "sound_label": "a short label for the sound e.g. 'your roar' or 'what Blobby says'" }` }] }],
+    config: { responseMimeType: 'application/json' }
+  });
+  res.json(JSON.parse(result.text));
+} catch (e) { next(e); } });
+
 // Core pipeline: user input → Gemini prompts → Veo video
 app.post('/api/generate-scene', async (req, res, next) => { try {
-  const { show_id, scene_number, user_input, parent_approved } = req.body;
+  const { show_id, scene_number, user_input, parent_approved, voice_response, character_traits } = req.body;
   if (!show_id || !user_input) return res.status(400).json({ error: 'show_id and user_input required' });
 
   // Content moderation — skip if parent already approved
@@ -336,6 +353,9 @@ Respond with ONLY valid JSON: { "flagged": true/false, "reason": "brief reason i
   const characterContext = existingCharacters.length
     ? `Characters in this story: ${existingCharacters.map(c => `${c.name} (${c.description})`).join(', ')}.`
     : 'No characters yet.';
+  const traitContext = character_traits && Object.keys(character_traits).length
+    ? `Character traits the child revealed: ${Object.entries(character_traits).map(([k, v]) => `${k}: "${v}"`).join('; ')}.`
+    : '';
 
   // Load previous scenes for continuity
   const prevEpisodes = await sql`
@@ -351,6 +371,7 @@ Respond with ONLY valid JSON: { "flagged": true/false, "reason": "brief reason i
     model: 'gemini-2.5-flash',
     contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
 ${characterContext}
+${traitContext}
 ${storyHistory}
 
 The child/parent just said: "${user_input}"
@@ -368,11 +389,16 @@ This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
 
   const prompts = JSON.parse(result.text);
 
+  // Inject child's voice response into Veo prompt if provided
+  const finalVeoPrompt = voice_response
+    ? `${prompts.veo_prompt} At one point the character opens their mouth and the words "${voice_response}" appear in a fun speech bubble above them.`
+    : prompts.veo_prompt;
+
   // Generate Veo video + Lyria music in parallel
   const [operation, lyriaRes] = await Promise.all([
     ai.models.generateVideos({
       model: 'veo-3.0-fast-generate-001',
-      prompt: prompts.veo_prompt,
+      prompt: finalVeoPrompt,
       config: { aspectRatio: '16:9', durationSeconds: 8 },
     }),
     ai.models.generateContent({

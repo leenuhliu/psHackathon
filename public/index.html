@@ -26,6 +26,8 @@
     .hint-box { background: #fffbe6; padding: 10px 14px; border-radius: 4px; margin-bottom: 12px; font-size: 14px; border-left: 3px solid #f4d03f; }
     @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
     .fade-in { animation: fadeSlideIn 0.6s ease forwards; opacity: 0; }
+    .story-card { display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border:1px solid #e0e0e0;border-radius:6px;margin-bottom:8px;background:#fafafa;font-size:13px; }
+    .story-card button { padding:6px 12px;font-size:12px; }
   </style>
 </head>
 <body>
@@ -40,6 +42,12 @@
     </div>
     <div id="voice-q-indicator" style="font-size:12px;color:#c00;min-height:16px;margin-bottom:8px;"></div>
     <button class="primary" onclick="answerQuestion()">Next →</button>
+  </div>
+  <!-- Past stories -->
+  <div id="past-stories-section" style="margin-top:24px;display:none;">
+    <hr style="border:none;border-top:1px solid #eee;margin-bottom:16px;">
+    <h4 style="margin:0 0 10px;font-size:14px;color:#555;">📚 Your Past Stories</h4>
+    <div id="past-stories-list"></div>
   </div>
 </div>
 
@@ -57,6 +65,24 @@
   <div class="status" id="char-status"></div>
   <img class="styled" id="styled-img" style="display:none" />
   <div id="char-description" style="font-size:13px;color:#555;margin:4px 0;font-style:italic;"></div>
+</div>
+
+<!-- SCREEN 2.5: Character trait questions -->
+<div class="screen" id="screen-charqs">
+  <div style="text-align:center;padding:8px 0 4px;">
+    <div style="font-size:2rem;margin-bottom:6px;">🌟</div>
+    <p style="color:#888;font-size:13px;margin-bottom:16px;">Let's get to know your character!</p>
+  </div>
+  <div style="text-align:center;padding:12px 0;">
+    <div id="charqs-text" style="font-size:1.3rem;font-weight:bold;margin-bottom:20px;min-height:2rem;"></div>
+    <div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:12px;">
+      <input id="charqs-input" type="text" placeholder="Type your answer..." style="max-width:320px;font-size:1rem;" onkeydown="if(event.key==='Enter')answerCharQ()" />
+      <button id="btn-charqs-mic" onclick="toggleCharQVoice()" title="Use voice">🎤</button>
+    </div>
+    <div id="voice-charqs-indicator" style="font-size:12px;color:#c00;min-height:16px;margin-bottom:8px;"></div>
+    <button class="primary" onclick="answerCharQ()">Next →</button>
+    <button onclick="skipCharQs()" style="font-size:12px;color:#aaa;border-color:#ddd;margin-left:6px;">Skip</button>
+  </div>
 </div>
 
 <!-- Parental approval overlay -->
@@ -87,6 +113,17 @@
   </div>
 
   <div class="status" id="scene-status"></div>
+
+  <!-- Voice moment prompt (shown before Veo starts) -->
+  <div id="voice-moment" style="display:none;text-align:center;padding:20px;border:2px dashed #f4d03f;border-radius:8px;margin:12px 0;background:#fffbe6;">
+    <div id="voice-moment-text" style="font-size:1.1rem;font-weight:bold;margin-bottom:16px;"></div>
+    <div style="display:flex;gap:12px;justify-content:center;align-items:center;flex-wrap:wrap;">
+      <button id="btn-voice-moment" onclick="startVoiceMoment()" style="font-size:1.4rem;padding:14px 20px;border-radius:50%;width:60px;height:60px;">🎤</button>
+      <button onclick="skipVoiceMoment()" style="font-size:13px;color:#888;border-color:#ccc;">Skip</button>
+    </div>
+    <div id="voice-moment-status" style="font-size:12px;color:#888;margin-top:8px;min-height:16px;"></div>
+    <div id="voice-moment-response" style="font-size:13px;color:#333;margin-top:6px;font-style:italic;"></div>
+  </div>
 
   <!-- Draw while Veo loads -->
   <div id="loading-draw-area" style="display:none;border:1px dashed #ccc;padding:16px;border-radius:6px;margin:12px 0;">
@@ -123,6 +160,19 @@
   </div>
 </div>
 
+<!-- SCREEN 5: Revisit a past story -->
+<div class="screen" id="screen-revisit">
+  <div style="margin-bottom:12px;">
+    <button onclick="show('screen-setup')" style="font-size:12px;color:#888;border-color:#ccc;">← Back to Stories</button>
+  </div>
+  <div id="revisit-title" style="text-align:center;padding:8px 0 16px;"></div>
+  <div id="revisit-characters" style="display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin-bottom:20px;"></div>
+  <div id="revisit-scenes"></div>
+  <div style="text-align:center;margin-top:24px;">
+    <button class="primary" onclick="location.reload()">✨ Make a New Story</button>
+  </div>
+</div>
+
 <script>
   // ── State ───────────────────────────────────────────────────────────────
   let showId = null;
@@ -130,6 +180,9 @@
   const TOTAL_SCENES = 3;
   const scenes = [];
   const characters = [];
+  let characterTraits = {};
+  let charQStep = 0;
+  let charQVoiceRec = null;
 
   // ── Question flow (story name → character name) ──────────────────────────
   const QUESTIONS = [
@@ -165,6 +218,7 @@
       askQuestion();
     } else {
       showId = crypto.randomUUID();
+      saveStoryToHistory(showId, answers.storyName);
       document.getElementById('draw-heading').textContent = `🎨 Draw ${answers.charName}`;
       narrate(`Wonderful! Now draw ${answers.charName} on the canvas below.`);
       show('screen-draw');
@@ -199,7 +253,128 @@
   }
 
   // Start question flow after page fully loads so narrate() is ready
-  window.addEventListener('load', () => startQuestions());
+  window.addEventListener('load', () => { startQuestions(); loadPastStories(); });
+
+  // ── Character trait questions ────────────────────────────────────────────
+  function charQText(template, name) {
+    return template.replace('{name}', name || 'your character');
+  }
+
+  const CHAR_Q_TEMPLATES = [
+    { key: 'loves',  text: 'What does {name} love to do most?' },
+    { key: 'fears',  text: 'What is {name} a little bit afraid of?' },
+  ];
+
+  function startCharQuestions(charName) {
+    charQStep = 0;
+    characterTraits = {};
+    show('screen-charqs');
+    askCharQ(charName);
+  }
+
+  function askCharQ(charName) {
+    const q = CHAR_Q_TEMPLATES[charQStep];
+    const text = charQText(q.text, charName || answers.charName);
+    document.getElementById('charqs-text').textContent = text;
+    document.getElementById('charqs-input').value = '';
+    document.getElementById('charqs-input').focus();
+    document.getElementById('voice-charqs-indicator').textContent = '';
+    document.getElementById('btn-charqs-mic').textContent = '🎤';
+    narrate(text);
+  }
+
+  function answerCharQ() {
+    const val = document.getElementById('charqs-input').value.trim();
+    if (!val) return;
+    stopCharQVoice();
+    characterTraits[CHAR_Q_TEMPLATES[charQStep].key] = val;
+    charQStep++;
+    if (charQStep < CHAR_Q_TEMPLATES.length) {
+      askCharQ();
+    } else {
+      narrate(`Wonderful! Now let's build your first scene.`);
+      show('screen-scene');
+    }
+  }
+
+  function skipCharQs() {
+    stopCharQVoice();
+    show('screen-scene');
+  }
+
+  function toggleCharQVoice() {
+    if (charQVoiceRec) { stopCharQVoice(); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return alert('Speech recognition not supported. Use Chrome.');
+    charQVoiceRec = new SR();
+    charQVoiceRec.continuous = false; charQVoiceRec.interimResults = true;
+    charQVoiceRec.onresult = (e) => {
+      document.getElementById('charqs-input').value =
+        Array.from(e.results).map(r => r[0].transcript).join('');
+    };
+    charQVoiceRec.onend = () => { stopCharQVoice(); answerCharQ(); };
+    charQVoiceRec.onerror = () => stopCharQVoice();
+    charQVoiceRec.start();
+    document.getElementById('btn-charqs-mic').textContent = '⏹';
+    document.getElementById('voice-charqs-indicator').textContent = '● listening...';
+  }
+
+  function stopCharQVoice() {
+    charQVoiceRec?.stop(); charQVoiceRec = null;
+    document.getElementById('btn-charqs-mic').textContent = '🎤';
+    document.getElementById('voice-charqs-indicator').textContent = '';
+  }
+
+  // ── Past stories (localStorage) ──────────────────────────────────────────
+  const STORIES_KEY = 'story_builder_shows';
+
+  function saveStoryToHistory(id, name) {
+    const stories = JSON.parse(localStorage.getItem(STORIES_KEY) || '[]');
+    stories.unshift({ showId: id, storyName: name, timestamp: Date.now() });
+    localStorage.setItem(STORIES_KEY, JSON.stringify(stories.slice(0, 10)));
+  }
+
+  function loadPastStories() {
+    const stories = JSON.parse(localStorage.getItem(STORIES_KEY) || '[]');
+    if (!stories.length) return;
+    const section = document.getElementById('past-stories-section');
+    const list = document.getElementById('past-stories-list');
+    section.style.display = 'block';
+    list.innerHTML = stories.map(s => {
+      const date = new Date(s.timestamp).toLocaleDateString();
+      return `<div class="story-card">
+        <span><strong>${s.storyName || 'Untitled Story'}</strong> <span style="color:#aaa;font-size:11px;">${date}</span></span>
+        <button onclick="revisitStory('${s.showId}', '${(s.storyName || '').replace(/'/g, "\\'")}')">Watch ▶</button>
+      </div>`;
+    }).join('');
+  }
+
+  async function revisitStory(id, name) {
+    try {
+      const res = await fetch(`/api/show-bible?show_id=${id}`);
+      const data = await res.json();
+      // Title
+      document.getElementById('revisit-title').innerHTML = `
+        <div style="font-size:2rem;margin-bottom:8px;">🎬</div>
+        <h2 style="font-size:1.6rem;margin:4px 0;">${name || 'Our Story'}</h2>
+        <p style="color:#888;font-size:13px;">${data.episodes.length} scene${data.episodes.length !== 1 ? 's' : ''}</p>`;
+      // Characters
+      document.getElementById('revisit-characters').innerHTML = data.characters.map(c => `
+        <div style="text-align:center;">
+          <img src="${c.styled_frame_url}" style="width:80px;height:80px;object-fit:contain;border-radius:8px;border:2px solid #eee;background:#fafafa;">
+          <div style="font-size:12px;margin-top:4px;color:#555;">${c.name}</div>
+        </div>`).join('');
+      // Scenes
+      document.getElementById('revisit-scenes').innerHTML = data.episodes.map(e => `
+        <div class="scene-card">
+          <h4 style="margin:0 0 8px;">Scene ${e.episode_number}: ${e.title || ''}</h4>
+          <video src="${e.veo_clip_url}" controls style="width:100%;border-radius:4px;"></video>
+        </div>`).join('');
+      show('screen-revisit');
+    } catch (err) {
+      alert('Could not load story: ' + err.message);
+    }
+  }
 
   // ── Canvas setup ─────────────────────────────────────────────────────────
   const canvas1 = document.getElementById('draw-canvas');
@@ -243,10 +418,10 @@
   async function submitCharacter() {
     const name = answers.charName || 'Character';
     await addCharacter(name, canvas1, 'btn-add-char', 'char-status', 'styled-img', 'char-description');
-    setTimeout(() => show('screen-scene'), 1500);
+    setTimeout(() => startCharQuestions(name), 1500);
   }
 
-  function skipCharacter() { show('screen-scene'); }
+  function skipCharacter() { startCharQuestions(answers.charName || 'Character'); }
 
   // ── Parental approval ────────────────────────────────────────────────────
   let pendingApproval = null;
@@ -268,6 +443,48 @@
   }
 
   // ── Screen 3: Generate scene ─────────────────────────────────────────────
+  // ── Voice moment ──────────────────────────────────────────────────────────
+  let pendingVoiceResolve = null;
+  let voiceMomentRec = null;
+  let capturedVoiceResponse = null;
+
+  function showVoiceMoment(promptText) {
+    return new Promise((resolve) => {
+      pendingVoiceResolve = resolve;
+      document.getElementById('voice-moment-text').textContent = promptText;
+      document.getElementById('voice-moment-status').textContent = '';
+      document.getElementById('voice-moment-response').textContent = '';
+      document.getElementById('btn-voice-moment').textContent = '🎤';
+      document.getElementById('voice-moment').style.display = 'block';
+      narrate(promptText);
+    });
+  }
+
+  function startVoiceMoment() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { skipVoiceMoment(); return; }
+    const r = new SR();
+    r.continuous = false; r.interimResults = false;
+    voiceMomentRec = r;
+    document.getElementById('btn-voice-moment').textContent = '⏹';
+    document.getElementById('voice-moment-status').textContent = '● listening...';
+    r.onresult = (e) => {
+      const text = e.results[0][0].transcript;
+      document.getElementById('voice-moment-response').textContent = `"${text}"`;
+      document.getElementById('voice-moment-status').textContent = '✓ Got it!';
+      voiceMomentRec = null;
+      setTimeout(() => { if (pendingVoiceResolve) { pendingVoiceResolve(text); pendingVoiceResolve = null; } }, 800);
+    };
+    r.onerror = () => skipVoiceMoment();
+    r.onend = () => { document.getElementById('btn-voice-moment').textContent = '🎤'; };
+    r.start();
+  }
+
+  function skipVoiceMoment() {
+    voiceMomentRec?.stop(); voiceMomentRec = null;
+    if (pendingVoiceResolve) { pendingVoiceResolve(null); pendingVoiceResolve = null; }
+  }
+
   async function generateScene(parent_approved = false) {
     const input = document.getElementById('scene-input').value.trim();
     if (!input) return alert('Describe the scene');
@@ -276,6 +493,22 @@
     btn.disabled = true;
     fadeOutLyria();
     document.getElementById('scene-result').style.display = 'none';
+    status.innerHTML = `<span class="loader"></span>Thinking of a fun voice moment...`;
+
+    // Fetch a character-specific voice prompt
+    capturedVoiceResponse = null;
+    try {
+      const vpRes = await fetch('/api/scene-voice-prompt', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ show_id: showId, user_input: input })
+      });
+      const vpData = await vpRes.json();
+      if (vpData.voice_prompt) {
+        capturedVoiceResponse = await showVoiceMoment(vpData.voice_prompt);
+      }
+    } catch (_) {}
+
+    document.getElementById('voice-moment').style.display = 'none';
     document.getElementById('loading-draw-area').style.display = 'block';
     status.innerHTML = `<span class="loader"></span>Generating scene ${currentScene} with Veo (~1 min)...`;
 
@@ -283,7 +516,7 @@
       const res = await fetch('/api/generate-scene', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ show_id: showId, scene_number: currentScene, user_input: input, parent_approved })
+        body: JSON.stringify({ show_id: showId, scene_number: currentScene, user_input: input, parent_approved, voice_response: capturedVoiceResponse, character_traits: characterTraits })
       });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
