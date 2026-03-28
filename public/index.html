@@ -107,7 +107,10 @@
   <!-- Challenge/encounter box -->
   <div id="challenge-box" style="display:none;background:linear-gradient(135deg,#fff9e6,#fff0cc);border:2px solid #f4d03f;border-radius:10px;padding:16px 20px;margin-bottom:16px;">
     <div style="font-size:11px;font-weight:bold;color:#b8860b;letter-spacing:1px;margin-bottom:8px;">⚡ YOUR CHALLENGE</div>
-    <div id="challenge-text" style="font-size:1.05rem;line-height:1.55;color:#333;"></div>
+    <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap;">
+      <img id="challenge-image" style="display:none;width:140px;height:140px;object-fit:cover;border-radius:8px;border:2px solid #f4d03f;flex-shrink:0;" />
+      <div id="challenge-text" style="font-size:1.05rem;line-height:1.55;color:#333;flex:1;min-width:180px;"></div>
+    </div>
   </div>
   <!-- Loading challenge state -->
   <div id="challenge-loading" style="display:none;text-align:center;padding:20px 0;color:#888;font-size:14px;">
@@ -161,6 +164,21 @@
   </div>
 </div>
 
+<!-- SCREEN 3.5: Name your story -->
+<div class="screen" id="screen-name-story">
+  <div style="text-align:center;padding:32px 0 20px;">
+    <div style="font-size:3.5rem;margin-bottom:12px;">🎬</div>
+    <h2 style="font-size:1.6rem;margin-bottom:8px;">You did it!</h2>
+    <p style="color:#666;font-size:15px;margin-bottom:28px;">Your story is complete. What would you like to call it?</p>
+    <div style="display:flex;gap:8px;align-items:center;justify-content:center;margin-bottom:12px;">
+      <input id="story-name-input" type="text" placeholder="e.g. The Great Blobby Adventure" style="max-width:340px;font-size:1.1rem;" onkeydown="if(event.key==='Enter')submitStoryName()" />
+      <button id="btn-name-mic" onclick="toggleNameVoice()" title="Use voice">🎤</button>
+    </div>
+    <div id="voice-name-indicator" style="font-size:12px;color:#c00;min-height:16px;margin-bottom:12px;"></div>
+    <button class="primary" onclick="submitStoryName()" style="font-size:1rem;padding:12px 28px;">See My Story ✨</button>
+  </div>
+</div>
+
 <!-- SCREEN 4: Finale -->
 <div class="screen" id="screen-finale">
   <div id="finale-title" style="text-align:center;padding:16px 0 8px;"></div>
@@ -195,11 +213,12 @@
   let charQStep = 0;
   let charQVoiceRec = null;
   let currentChallenge = null;
+  let pendingClosingLine = null;
+  let nameVoiceRec = null;
 
   // ── Question flow (story name → character name) ──────────────────────────
   const QUESTIONS = [
-    { key: 'storyName',   text: "What would you like to call your story?" },
-    { key: 'charName',    text: "Great! Now, what's your main character's name?" },
+    { key: 'charName', text: "What's your main character's name?" },
   ];
   let qStep = 0;
   let answers = {};
@@ -230,7 +249,6 @@
       askQuestion();
     } else {
       showId = crypto.randomUUID();
-      saveStoryToHistory(showId, answers.storyName);
       document.getElementById('draw-heading').textContent = `🎨 Draw ${answers.charName}`;
       narrate(`Wonderful! Now draw ${answers.charName} on the canvas below.`);
       show('screen-draw');
@@ -335,6 +353,13 @@
     showChallengeLoading(false);
     currentChallenge = challenge;
     document.getElementById('challenge-text').textContent = challenge.challenge_text;
+    const img = document.getElementById('challenge-image');
+    if (challenge.challenge_image_url) {
+      img.src = challenge.challenge_image_url;
+      img.style.display = 'block';
+    } else {
+      img.style.display = 'none';
+    }
     document.getElementById('challenge-box').style.display = 'block';
     narrate(challenge.challenge_text);
     revealSolutionInput();
@@ -684,7 +709,7 @@
         btn.disabled = false;
       } else {
         status.textContent = '✓ All scenes done!';
-        showFinale(data.closing_line);
+        showNamingScreen(data.closing_line);
       }
     } catch (e) {
       status.className = 'status error';
@@ -730,6 +755,52 @@
       status.textContent = `Error: ${e.message}`;
       btn.disabled = false;
     }
+  }
+
+  // ── Story naming screen ──────────────────────────────────────────────────
+  function showNamingScreen(closingLine) {
+    pendingClosingLine = closingLine;
+    document.getElementById('story-name-input').value = '';
+    document.getElementById('voice-name-indicator').textContent = '';
+    document.getElementById('btn-name-mic').textContent = '🎤';
+    show('screen-name-story');
+    narrate("You did it! Your story is complete. What would you like to call it?");
+  }
+
+  function submitStoryName() {
+    const name = document.getElementById('story-name-input').value.trim() || `${answers.charName}'s Story`;
+    stopNameVoice();
+    answers.storyName = name;
+    saveStoryToHistory(showId, name);
+    // Update DB with the name
+    fetch(`/api/story/${showId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ story_name: name })
+    }).catch(() => {});
+    showFinale(pendingClosingLine);
+  }
+
+  function toggleNameVoice() {
+    if (nameVoiceRec) { stopNameVoice(); return; }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    nameVoiceRec = new SR();
+    nameVoiceRec.continuous = false; nameVoiceRec.interimResults = true;
+    nameVoiceRec.onresult = (e) => {
+      document.getElementById('story-name-input').value =
+        Array.from(e.results).map(r => r[0].transcript).join('');
+    };
+    nameVoiceRec.onend = () => { stopNameVoice(); submitStoryName(); };
+    nameVoiceRec.onerror = () => stopNameVoice();
+    nameVoiceRec.start();
+    document.getElementById('btn-name-mic').textContent = '⏹';
+    document.getElementById('voice-name-indicator').textContent = '● listening...';
+  }
+
+  function stopNameVoice() {
+    nameVoiceRec?.stop(); nameVoiceRec = null;
+    document.getElementById('btn-name-mic').textContent = '🎤';
+    document.getElementById('voice-name-indicator').textContent = '';
   }
 
   // ── Finale ───────────────────────────────────────────────────────────────

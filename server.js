@@ -290,13 +290,16 @@ app.post('/api/narrate', async (req, res, next) => { try {
 } catch (e) { next(e); } });
 
 // Shared helper: generate a challenge/encounter for the given scene
-async function buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name }) {
+async function buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name, show_id }) {
   const sceneLabel = scene_number >= 3
     ? 'Scene 3, the grand finale — make this feel like a big satisfying conclusion encounter'
     : `Scene ${scene_number} of 3${scene_number > 1 ? ' — raise the stakes a little from the previous scene' : ''}`;
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{ role: 'user', parts: [{ text: `You are a master storyteller for a children's interactive story app (ages 4–10).
+
+  // Get challenge text and image in parallel
+  const [textResult, imageResult] = await Promise.all([
+    ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `You are a master storyteller for a children's interactive story app (ages 4–10).
 
 Story name: "${story_name || 'Our Story'}"
 ${characterContext}
@@ -313,14 +316,39 @@ Rules:
 - 2–3 sentences max, full of sensory detail and drama
 - The child's creative answer will determine what actually happens in the animated scene
 
+Also include a short image prompt to illustrate the problem.
+
 Respond with ONLY valid JSON:
 {
   "challenge_text": "Full vivid challenge addressed to the child",
-  "challenge_short": "5–8 word dramatic summary (e.g. 'A giant spider guards the bridge!')"
+  "challenge_short": "5–8 word dramatic summary (e.g. 'A giant spider guards the bridge!')",
+  "image_prompt": "A simple children's book illustration showing the problem: [describe the obstacle/creature/scene clearly in 1 sentence, hand-drawn cartoon style, warm colors, no text]"
 }` }] }],
-    config: { responseMimeType: 'application/json' }
-  });
-  return JSON.parse(result.text);
+      config: { responseMimeType: 'application/json' }
+    }),
+    // Small challenge illustration
+    ai.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents: [{ role: 'user', parts: [{ text: `A simple, colorful children's storybook illustration showing a dramatic challenge or obstacle. Hand-drawn cartoon style, warm vibrant colors, expressive and fun, clear focal point, no text. Scene: ${storyHistory.split('|').slice(-1)[0] || 'an adventure in a colorful world'}.` }] }],
+      config: { responseModalities: ['IMAGE', 'TEXT'] }
+    }).catch(() => null)  // don't fail the whole challenge if image generation errors
+  ]);
+
+  const challenge = JSON.parse(textResult.text);
+
+  // Save image if we got one
+  if (imageResult && show_id) {
+    try {
+      const imgPart = imageResult.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('image'));
+      if (imgPart) {
+        const imgFilename = `${show_id}-challenge-${scene_number}-${Date.now()}.png`;
+        writeFileSync(join(__dirname, 'public', 'generated', imgFilename), Buffer.from(imgPart.inlineData.data, 'base64'));
+        challenge.challenge_image_url = `/generated/${imgFilename}`;
+      }
+    } catch (_) {}
+  }
+
+  return challenge;
 }
 
 // Called after character questions to get the first scene's challenge
@@ -337,7 +365,7 @@ app.post('/api/generate-challenge', async (req, res, next) => { try {
   const storyHistory = episodes.length
     ? `Previous scenes: ${episodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ')}`
     : 'This is the very first scene.';
-  const challenge = await buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name });
+  const challenge = await buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name, show_id });
   res.json(challenge);
 } catch (e) { next(e); } });
 
@@ -486,7 +514,7 @@ Respond with ONLY valid JSON:
     `;
     const updatedHistory = updatedEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ');
     next_challenge = await buildChallenge(scene_number + 1, {
-      characterContext, traitContext, storyHistory: updatedHistory, story_name: story_name || ''
+      characterContext, traitContext, storyHistory: updatedHistory, story_name: story_name || '', show_id
     });
   }
 
