@@ -19,6 +19,7 @@
   },
   "homepage": "https://github.com/samuelbingham07/psHackathon#readme",
   "dependencies": {
+    "@google/genai": "^1.46.0",
     "@neondatabase/serverless": "^1.0.2",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
