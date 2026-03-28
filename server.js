@@ -360,7 +360,8 @@ This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
   "veo_prompt": "Detailed cinematic scene description for Veo 3. Richly colored hand-drawn animation style with vibrant fully-painted backgrounds, warm and slow-paced, 8 seconds. Include the character visually in the scene. In the very last half-second, red velvet theatrical curtains snap shut quickly from both sides, ending frozen on closed curtains with 'Scene End' in a warm storybook font in the center — this must be the very last frame.",
   "lyria_prompt": "Music prompt for Lyria. Warm, gentle, children's animated tone.",
   "episode_title": "Short fun title for this scene",
-  "next_prompt": "A warm, one-sentence question to ask the child to inspire scene ${scene_number + 1}. ${scene_number >= 3 ? 'This is the last scene, so say something celebratory instead.' : ''}"
+  "next_prompt": "A warm, one-sentence question to ask the child to inspire scene ${scene_number + 1}. ${scene_number >= 3 ? 'This is the last scene, so say something celebratory instead.' : ''}",
+  "closing_line": ${scene_number >= 3 ? '"The End! What a [pick ONE vivid adjective perfectly matching the mood and events of this specific story — e.g. magical, daring, silly, heartwarming, adventurous] story!"' : 'null'}
 }` }] }],
     config: { responseMimeType: 'application/json' }
   });
@@ -417,7 +418,7 @@ This is scene ${scene_number} of 3. Respond with ONLY valid JSON:
     DO UPDATE SET value = EXCLUDED.value, last_updated = now()
   `;
 
-  res.json({ video_url, audio_url, episode_title: prompts.episode_title, next_prompt: prompts.next_prompt });
+  res.json({ video_url, audio_url, episode_title: prompts.episode_title, next_prompt: prompts.next_prompt, closing_line: prompts.closing_line || null });
 } catch (e) { next(e); } });
 
 // Return JSON for any unhandled errors instead of Express HTML
@@ -484,5 +485,6 @@ wss.on('connection', async (ws) => {
 });
 
 initDb().then(() => {
-  server.listen(3001, () => console.log('API running on http://localhost:3001'));
+  const PORT = process.env.PORT || 3001;
+  server.listen(PORT, () => console.log(`API running on http://localhost:${PORT}`));
 });
