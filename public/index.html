@@ -659,10 +659,11 @@
     hideSolutionInput();
     document.getElementById('challenge-box').style.display = 'none';
     document.getElementById('loading-draw-area').style.display = 'block';
-    status.innerHTML = `<span class="loader"></span>Animating your solution (~1 min)...`;
+    status.innerHTML = `<span class="loader"></span>Starting...`;
 
     try {
-      const res = await fetch('/api/generate-scene', {
+      // Start job
+      const startRes = await fetch('/api/generate-scene', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -673,8 +674,11 @@
           character_traits: characterTraits
         })
       });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
+      const { job_id, error: startErr } = await startRes.json();
+      if (startErr) throw new Error(startErr);
+
+      // Poll until done
+      const data = await pollSceneJob(job_id, status);
 
       if (data.needs_approval) {
         document.getElementById('loading-draw-area').style.display = 'none';
@@ -700,7 +704,6 @@
         document.getElementById('scene-heading').textContent = `Scene ${currentScene} of ${TOTAL_SCENES}`;
         document.getElementById('btn-generate').textContent = `Generate Scene ${currentScene}`;
         document.getElementById('scene-input').value = '';
-        // Show the next challenge that came back with the scene response
         if (data.next_challenge) {
           displayChallenge(data.next_challenge);
         } else {
@@ -718,6 +721,54 @@
       revealSolutionInput();
       btn.disabled = false;
     }
+  }
+
+  // ── Job progress polling ─────────────────────────────────────────────────
+  const STEP_LABELS = {
+    queued:             '⏳ Starting...',
+    moderation:         '🔍 Checking story content...',
+    loading_context:    '📖 Loading story context...',
+    building_prompts:   '✍️  Writing scene script...',
+    starting_generation:'🚀 Kicking off Veo + Lyria...',
+    lyria_done:         '🎵 Music ready, waiting for video...',
+    veo_queued:         '🎬 Veo job submitted...',
+    veo_polling:        '🎬 Animating...',
+    veo_done:           '✅ Video done, saving...',
+    saving:             '💾 Saving files...',
+    saving_db:          '🗄️  Saving to database...',
+    next_challenge:     '🎲 Generating next challenge...',
+  };
+
+  function fmtElapsed(ms) {
+    if (ms < 1000) return `${ms}ms`;
+    return `${(ms / 1000).toFixed(1)}s`;
+  }
+
+  async function pollSceneJob(jobId, statusEl) {
+    return new Promise((resolve, reject) => {
+      const poll = setInterval(async () => {
+        try {
+          const res = await fetch(`/api/scene-progress/${jobId}`);
+          const job = await res.json();
+
+          if (job.status === 'running') {
+            const label = STEP_LABELS[job.step] || job.label || job.step;
+            const pollInfo = job.veo_poll > 0 ? ` (poll #${job.veo_poll})` : '';
+            statusEl.innerHTML = `<span class="loader"></span>${label}${pollInfo} <span style="color:#aaa;font-size:11px;">${fmtElapsed(job.elapsed_ms)}</span>`;
+          } else if (job.status === 'needs_approval') {
+            clearInterval(poll);
+            resolve({ needs_approval: true, reason: job.reason });
+          } else if (job.status === 'done') {
+            clearInterval(poll);
+            statusEl.innerHTML = `✓ Done in ${fmtElapsed(job.elapsed_ms)}`;
+            resolve(job.result);
+          } else if (job.status === 'error') {
+            clearInterval(poll);
+            reject(new Error(job.error));
+          }
+        } catch (e) { clearInterval(poll); reject(e); }
+      }, 2000);
+    });
   }
 
   // ── Loading-time draw ────────────────────────────────────────────────────

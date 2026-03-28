@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { randomUUID } from 'crypto';
 import { setDefaultResultOrder } from 'dns';
 setDefaultResultOrder('ipv4first');
 import { createServer } from 'http';
@@ -387,56 +388,61 @@ Respond with ONLY valid JSON: { "voice_prompt": "...", "sound_label": "a short l
   res.json(JSON.parse(result.text));
 } catch (e) { next(e); } });
 
-// Core pipeline: child's creative solution → Gemini prompts → Veo video
-app.post('/api/generate-scene', async (req, res, next) => { try {
-  const { show_id, scene_number, solution, challenge_text, story_name, parent_approved, voice_response, character_traits } = req.body;
-  if (!show_id || !solution) return res.status(400).json({ error: 'show_id and solution required' });
+// ── Job-based scene pipeline ────────────────────────────────────────────────
+const jobs = new Map();
+// Clean up jobs older than 30 minutes to avoid memory leaks
+setInterval(() => {
+  const cutoff = Date.now() - 30 * 60 * 1000;
+  for (const [id, job] of jobs) { if (job.started_at < cutoff) jobs.delete(id); }
+}, 5 * 60 * 1000);
 
-  // Content moderation — skip if parent already approved
-  if (!parent_approved) {
-    const modResult = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [{ role: 'user', parts: [{ text: `You are a content moderator for a children's storytelling app for ages 3-10. Assess whether the following story input is appropriate for young children. Flag it if it contains any violence, scary themes, adult content, strong language, or anything PG-13 or above.
+async function runScenePipeline(jobId, params) {
+  const { show_id, scene_number, solution, challenge_text, story_name, parent_approved, voice_response, character_traits } = params;
+  const t0 = Date.now();
+  const log = (step, label, extra = {}) => {
+    const elapsed_ms = Date.now() - t0;
+    jobs.set(jobId, { status: 'running', step, label, elapsed_ms, started_at: jobs.get(jobId)?.started_at ?? t0, ...extra });
+    console.log(`[job:${jobId.slice(0,8)}] +${elapsed_ms}ms  ${step}: ${label}`);
+  };
 
-Input: "${solution}"
-
-Respond with ONLY valid JSON: { "flagged": true/false, "reason": "brief reason if flagged, otherwise null" }` }] }],
-      config: { responseMimeType: 'application/json' }
-    });
-    const mod = JSON.parse(modResult.text);
-    if (mod.flagged) {
-      return res.json({ needs_approval: true, reason: mod.reason });
+  try {
+    log('moderation', 'Checking story content...');
+    if (!parent_approved) {
+      const modResult = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ role: 'user', parts: [{ text: `You are a content moderator for a children's storytelling app for ages 3-10. Assess whether the following story input is appropriate for young children. Flag it if it contains any violence, scary themes, adult content, strong language, or anything PG-13 or above.\n\nInput: "${solution}"\n\nRespond with ONLY valid JSON: { "flagged": true/false, "reason": "brief reason if flagged, otherwise null" }` }] }],
+        config: { responseMimeType: 'application/json' }
+      });
+      const mod = JSON.parse(modResult.text);
+      if (mod.flagged) {
+        jobs.set(jobId, { status: 'needs_approval', reason: mod.reason, elapsed_ms: Date.now() - t0, started_at: t0 });
+        console.log(`[job:${jobId.slice(0,8)}] +${Date.now()-t0}ms  needs_approval: ${mod.reason}`);
+        return;
+      }
     }
-  }
 
-  // Load characters for context
-  const existingCharacters = await sql`
-    SELECT name, description, styled_frame_url FROM characters WHERE show_id = ${show_id}
-  `;
-  const characterContext = existingCharacters.length
-    ? `Characters in this story: ${existingCharacters.map(c => `${c.name} (${c.description})`).join(', ')}.`
-    : 'No characters yet.';
-  const traitContext = character_traits && Object.keys(character_traits).length
-    ? `Character traits the child revealed: ${Object.entries(character_traits).map(([k, v]) => `${k}: "${v}"`).join('; ')}.`
-    : '';
+    log('loading_context', 'Loading story context...');
+    const [existingCharacters, prevEpisodes] = await Promise.all([
+      sql`SELECT name, description, styled_frame_url FROM characters WHERE show_id = ${show_id}`,
+      sql`SELECT episode_number, title, story_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`
+    ]);
+    const characterContext = existingCharacters.length
+      ? `Characters in this story: ${existingCharacters.map(c => `${c.name} (${c.description})`).join(', ')}.`
+      : 'No characters yet.';
+    const traitContext = character_traits && Object.keys(character_traits).length
+      ? `Character traits the child revealed: ${Object.entries(character_traits).map(([k, v]) => `${k}: "${v}"`).join('; ')}.`
+      : '';
+    const storyHistory = prevEpisodes.length
+      ? `Previous scenes: ${prevEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ')}`
+      : 'This is the first scene.';
 
-  // Load previous scenes for continuity
-  const prevEpisodes = await sql`
-    SELECT episode_number, title, story_prompt FROM episodes
-    WHERE show_id = ${show_id} ORDER BY episode_number ASC
-  `;
-  const storyHistory = prevEpisodes.length
-    ? `Previous scenes: ${prevEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ')}`
-    : 'This is the first scene.';
-
-  // Ask Gemini to build the scene showing the child's solution succeeding
-  const challengeContext = challenge_text
-    ? `The challenge the child was given: "${challenge_text}"\nThe child's creative solution: "${solution}"`
-    : `The child's idea for the scene: "${solution}"`;
-
-  const result = await ai.models.generateContent({
-    model: 'gemini-2.5-flash',
-    contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
+    log('building_prompts', 'Writing scene script...');
+    const challengeContext = challenge_text
+      ? `The challenge the child was given: "${challenge_text}"\nThe child's creative solution: "${solution}"`
+      : `The child's idea for the scene: "${solution}"`;
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
 Story name: "${story_name || 'Our Story'}"
 ${characterContext}
 ${traitContext}
@@ -456,73 +462,99 @@ Respond with ONLY valid JSON:
   "story_prompt_summary": "One sentence describing what happened (for story continuity context in future scenes)",
   "closing_line": ${scene_number >= 3 ? '"The End! What a [pick ONE vivid adjective perfectly matching the mood and events of this specific story — e.g. magical, daring, silly, heartwarming, adventurous] story!"' : 'null'}
 }` }] }],
-    config: { responseMimeType: 'application/json' }
-  });
+      config: { responseMimeType: 'application/json' }
+    });
+    const prompts = JSON.parse(result.text);
+    const finalVeoPrompt = voice_response
+      ? `${prompts.veo_prompt} At one point the character opens their mouth and the words "${voice_response}" appear in a fun speech bubble above them.`
+      : prompts.veo_prompt;
 
-  const prompts = JSON.parse(result.text);
-
-  // Inject child's voice response into Veo prompt if provided
-  const finalVeoPrompt = voice_response
-    ? `${prompts.veo_prompt} At one point the character opens their mouth and the words "${voice_response}" appear in a fun speech bubble above them.`
-    : prompts.veo_prompt;
-
-  // Generate Veo video + Lyria music in parallel
-  const [operation, lyriaRes] = await Promise.all([
-    ai.models.generateVideos({
-      model: 'veo-3.0-fast-generate-001',
-      prompt: finalVeoPrompt,
-      config: { aspectRatio: '16:9', durationSeconds: 8 },
-    }),
-    ai.models.generateContent({
+    log('starting_generation', 'Kicking off Veo 3 + Lyria in parallel...');
+    // Fire both; Lyria usually finishes first, Veo returns an operation handle
+    let lyriaRes;
+    const lyriaPromise = ai.models.generateContent({
       model: 'lyria-3-clip-preview',
       contents: [{ role: 'user', parts: [{ text: prompts.lyria_prompt }] }],
       config: { responseModalities: ['AUDIO'] },
-    }),
-  ]);
+    }).then(r => { lyriaRes = r; log('lyria_done', `Lyria music ready (+${Date.now()-t0}ms)`); return r; });
 
-  // Poll Veo until done
-  let veoOp = operation;
-  while (!veoOp.done) {
-    await new Promise(r => setTimeout(r, 5000));
-    veoOp = await ai.operations.getVideosOperation({ operation: veoOp });
-  }
-
-  // Save Veo video
-  const filename = `${show_id}-scene-${scene_number}.mp4`;
-  const downloadPath = join(__dirname, 'public', 'generated', filename);
-  const video = veoOp.response.generatedVideos[0];
-  await ai.files.download({ file: video.video, downloadPath });
-  const video_url = `/generated/${filename}`;
-
-  // Save Lyria audio
-  const audioPart = lyriaRes.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('audio'));
-  const audioFilename = `${show_id}-scene-${scene_number}.mp3`;
-  writeFileSync(join(__dirname, 'public', 'generated', audioFilename), Buffer.from(audioPart.inlineData.data, 'base64'));
-  const audio_url = `/generated/${audioFilename}`;
-
-  // Save episode to DB
-  const storyPromptSummary = prompts.story_prompt_summary || solution;
-  await sql`
-    INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url)
-    VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${storyPromptSummary}, ${video_url}, ${audio_url})
-    ON CONFLICT DO NOTHING
-  `;
-
-  // Generate the next challenge (scenes 1 and 2 only)
-  let next_challenge = null;
-  if (scene_number < 3) {
-    const updatedEpisodes = await sql`
-      SELECT episode_number, title, story_prompt FROM episodes
-      WHERE show_id = ${show_id} ORDER BY episode_number ASC
-    `;
-    const updatedHistory = updatedEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ');
-    next_challenge = await buildChallenge(scene_number + 1, {
-      characterContext, traitContext, storyHistory: updatedHistory, story_name: story_name || '', show_id
+    const veoOp0 = await ai.models.generateVideos({
+      model: 'veo-3.0-fast-generate-001',
+      prompt: finalVeoPrompt,
+      config: { aspectRatio: '16:9', durationSeconds: 8 },
     });
-  }
+    log('veo_queued', 'Veo job submitted, waiting for generation...', { veo_poll: 0 });
 
-  res.json({ video_url, audio_url, episode_title: prompts.episode_title, next_challenge, closing_line: prompts.closing_line || null });
-} catch (e) { next(e); } });
+    // Poll Veo while Lyria runs concurrently
+    let veoOp = veoOp0;
+    let pollCount = 0;
+    while (!veoOp.done) {
+      await new Promise(r => setTimeout(r, 5000));
+      pollCount++;
+      veoOp = await ai.operations.getVideosOperation({ operation: veoOp });
+      log('veo_polling', `Veo generating... (poll #${pollCount}, ${Math.round((Date.now()-t0)/1000)}s elapsed)`, { veo_poll: pollCount });
+    }
+    log('veo_done', `Veo finished after ${pollCount} polls (+${Date.now()-t0}ms)`);
+
+    // Make sure Lyria is also done
+    await lyriaPromise;
+
+    log('saving', 'Saving video and audio files...');
+    const filename = `${show_id}-scene-${scene_number}.mp4`;
+    await ai.files.download({ file: veoOp.response.generatedVideos[0].video, downloadPath: join(__dirname, 'public', 'generated', filename) });
+    const video_url = `/generated/${filename}`;
+
+    const audioPart = lyriaRes.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('audio'));
+    const audioFilename = `${show_id}-scene-${scene_number}.mp3`;
+    writeFileSync(join(__dirname, 'public', 'generated', audioFilename), Buffer.from(audioPart.inlineData.data, 'base64'));
+    const audio_url = `/generated/${audioFilename}`;
+
+    log('saving_db', 'Saving to database...');
+    await sql`
+      INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url)
+      VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${prompts.story_prompt_summary || solution}, ${video_url}, ${audio_url})
+      ON CONFLICT DO NOTHING
+    `;
+
+    let next_challenge = null;
+    if (scene_number < 3) {
+      log('next_challenge', 'Generating next challenge...');
+      const updatedEpisodes = await sql`SELECT episode_number, title, story_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`;
+      const updatedHistory = updatedEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ');
+      next_challenge = await buildChallenge(scene_number + 1, { characterContext, traitContext, storyHistory: updatedHistory, story_name: story_name || '', show_id });
+    }
+
+    const total_ms = Date.now() - t0;
+    console.log(`[job:${jobId.slice(0,8)}] DONE in ${total_ms}ms (${Math.round(total_ms/1000)}s)`);
+    jobs.set(jobId, {
+      status: 'done',
+      result: { video_url, audio_url, episode_title: prompts.episode_title, next_challenge, closing_line: prompts.closing_line || null },
+      elapsed_ms: total_ms,
+      started_at: t0
+    });
+  } catch (e) {
+    const elapsed_ms = Date.now() - t0;
+    console.error(`[job:${jobId.slice(0,8)}] ERROR at +${elapsed_ms}ms:`, e.message);
+    jobs.set(jobId, { status: 'error', error: e.message, elapsed_ms, started_at: t0 });
+  }
+}
+
+// Start scene generation job, return job_id immediately
+app.post('/api/generate-scene', (req, res) => {
+  const { show_id, solution } = req.body;
+  if (!show_id || !solution) return res.status(400).json({ error: 'show_id and solution required' });
+  const jobId = randomUUID();
+  jobs.set(jobId, { status: 'running', step: 'queued', label: 'Starting...', elapsed_ms: 0, started_at: Date.now() });
+  runScenePipeline(jobId, req.body);
+  res.json({ job_id: jobId });
+});
+
+// Poll job progress
+app.get('/api/scene-progress/:jobId', (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
+});
 
 // Return JSON for any unhandled errors instead of Express HTML
 app.use((err, req, res, next) => {
