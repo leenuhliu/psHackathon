@@ -1,0 +1,54 @@
+@import './fonts.css';
+@import './tailwind.css';
+@import './theme.css';
+
+/* iPad locked dimensions */
+html, body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  background: #1a1a1a;
+}
+
+#root {
+  width: 1024px;
+  height: 768px;
+  margin: 0 auto;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  overflow: hidden;
+  touch-action: none;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+/* Scale down on smaller screens */
+@media (max-width: 1024px), (max-height: 768px) {
+  #root {
+    width: 100vw;
+    height: 100vh;
+    transform: translate(-50%, -50%) scale(calc(min(100vw / 1024, 100vh / 768)));
+    transform-origin: center;
+  }
+}
+
+/* Prevent text selection for better touch experience */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Allow text selection in input areas */
+input, textarea {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Smooth scrolling */
+* {
+  -webkit-overflow-scrolling: touch;
+}
