@@ -33,7 +33,15 @@ export function ViewingScreen() {
   const [error, setError] = useState<string | null>(null);
   const [replaySlide, setReplaySlide] = useState(0);
 
-  const storyName = storyDetails[0] || 'My Adventure';
+  const storyName = storyDetails[1] || storyDetails[0] || 'My Adventure';
+  const storyContext = storyDetails.length > 0
+    ? [
+        storyDetails[0] && `Setting: ${storyDetails[0]}`,
+        storyDetails[1] && `Main character: ${storyDetails[1]}`,
+        storyDetails[2] && `Adventure: ${storyDetails[2]}`,
+        storyDetails[3] && `Ending: ${storyDetails[3]}`,
+      ].filter(Boolean).join('\n')
+    : '';
 
   const fetchChallenge = useCallback(async (sceneNum: number) => {
     setIsLoadingChallenge(true);
@@ -46,6 +54,7 @@ export function ViewingScreen() {
           show_id: showIdRef.current,
           scene_number: sceneNum,
           story_name: storyName,
+          story_context: storyContext,
         }),
       });
       if (!resp.ok) throw new Error('Failed to get challenge');
@@ -76,6 +85,7 @@ export function ViewingScreen() {
           solution: solution.trim(),
           challenge_text: challenge?.challenge_text,
           story_name: storyName,
+          story_context: storyContext,
           parent_approved: true,
         }),
       });

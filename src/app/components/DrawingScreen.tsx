@@ -255,6 +255,13 @@ export function DrawingScreen() {
         const showId = showIdRef.current;
 
         // Send character drawings (stages 0 and 1) to backend for AI styling
+        // Use the character name from the story the child described (storyDetails[1]),
+        // falling back to the stage label if not available
+        const charNames = [
+          storyDetails[1] || stages[0].label,
+          storyDetails[3] || stages[1].label,
+        ];
+
         await Promise.all(
           [0, 1].map(async (stageIdx) => {
             if (newSavedDrawings[stageIdx]) {
@@ -264,7 +271,7 @@ export function DrawingScreen() {
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({
                     show_id: showId,
-                    name: stages[stageIdx].label,
+                    name: charNames[stageIdx],
                     image_data: newSavedDrawings[stageIdx],
                   }),
                 });

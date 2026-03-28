@@ -300,7 +300,8 @@ app.post('/api/narrate', async (req, res, next) => { try {
 const CHILD_VOCAB = `VOCABULARY RULE: Every word you write must be understood by a 6–10 year old. Use short, everyday words. If you want to describe something glowing, say "glowing" or "bright" — not "iridescent" or "luminescent". If something moves, say "bouncing" or "shaking" — not "pulsing" or "oscillating". No fancy adjectives, no unusual nouns. Write like you're talking to a child, not describing a painting.`;
 
 // Shared helper: generate a challenge/encounter for the given scene
-async function buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name, show_id }) {
+async function buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name, show_id, story_context }) {
+  const storyContextSection = story_context ? `\nThe child's story plan:\n${story_context}\n` : '';
   const sceneLabel = scene_number >= 3
     ? 'Scene 3, the grand finale — make this feel like a big satisfying conclusion encounter'
     : `Scene ${scene_number} of 3${scene_number > 1 ? ' — raise the stakes a little from the previous scene' : ''}`;
@@ -314,7 +315,7 @@ Story name: "${story_name || 'Our Story'}"
 ${characterContext}
 ${traitContext}
 ${storyHistory}
-
+${storyContextSection}
 Generate an exciting, age-appropriate CHALLENGE or ENCOUNTER for ${sceneLabel}.
 
 Rules:
@@ -360,7 +361,7 @@ Respond with ONLY valid JSON:
 
 // Called after character questions to get the first scene's challenge
 app.post('/api/generate-challenge', async (req, res, next) => { try {
-  const { show_id, scene_number = 1, story_name = '', character_traits } = req.body;
+  const { show_id, scene_number = 1, story_name = '', character_traits, story_context = '' } = req.body;
   const chars = await sql`SELECT name, description FROM characters WHERE show_id = ${show_id}`;
   const episodes = await sql`SELECT episode_number, title, story_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`;
   const characterContext = chars.length
@@ -372,7 +373,7 @@ app.post('/api/generate-challenge', async (req, res, next) => { try {
   const storyHistory = episodes.length
     ? `Previous scenes: ${episodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ')}`
     : 'This is the very first scene.';
-  const challenge = await buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name, show_id });
+  const challenge = await buildChallenge(scene_number, { characterContext, traitContext, storyHistory, story_name, show_id, story_context });
   res.json(challenge);
 } catch (e) { next(e); } });
 
@@ -402,7 +403,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 async function runScenePipeline(jobId, params) {
-  const { show_id, scene_number, solution, challenge_text, story_name, parent_approved, voice_response, character_traits } = params;
+  const { show_id, scene_number, solution, challenge_text, story_name, parent_approved, voice_response, character_traits, story_context } = params;
   const t0 = Date.now();
   // Step order — a background log (e.g. lyria_done) won't overwrite a later step
   const STEP_ORDER = ['loading_context','building_prompts','lyria_starting','awaiting_voice',
@@ -497,6 +498,8 @@ You MUST write the veo_prompt so that the art style, color palette, character ap
     const visualStyleInstruction = scene_number === 1 ? `
 Since this is scene 1, you must also define the visual style that will be used for ALL 3 scenes. Include a "visual_style" field in your JSON with a brief description of the art style, color palette, and world setting that will be consistent across all scenes.` : '';
 
+    const storyContextSection = story_context ? `\nThe child's story plan:\n${story_context}\n` : '';
+
     const result = await ai.models.generateContent({
       model: 'gemini-2.5-flash',
       contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
@@ -504,7 +507,7 @@ Story name: "${story_name || 'Our Story'}"
 ${characterContext}
 ${traitContext}
 ${storyHistory}
-
+${storyContextSection}
 ${challengeContext}
 
 This is scene ${scene_number} of 3. The child's solution must be shown WORKING — their idea succeeds in a satisfying, fun way. The animation celebrates their creativity.
@@ -632,7 +635,7 @@ Respond with ONLY valid JSON:
       log('next_challenge', 'Generating next challenge...');
       const updatedEpisodes = await sql`SELECT episode_number, title, story_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`;
       const updatedHistory = updatedEpisodes.map(e => `Scene ${e.episode_number}: ${e.title} — ${e.story_prompt}`).join(' | ');
-      next_challenge = await buildChallenge(scene_number + 1, { characterContext, traitContext, storyHistory: updatedHistory, story_name: story_name || '', show_id });
+      next_challenge = await buildChallenge(scene_number + 1, { characterContext, traitContext, storyHistory: updatedHistory, story_name: story_name || '', show_id, story_context });
     }
 
     const total_ms = Date.now() - t0;
