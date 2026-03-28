@@ -479,20 +479,33 @@ Respond with ONLY valid JSON:
     }).then(r => { lyriaRes = r; log('lyria_done', `Lyria music ready (+${Date.now()-t0}ms)`); return r; });
 
     const veoOp0 = await ai.models.generateVideos({
-      model: 'veo-3.0-fast-generate-001',
+      model: 'veo-3.1-fast-generate-001',
       prompt: finalVeoPrompt,
       config: { aspectRatio: '16:9', durationSeconds: 8 },
     });
     log('veo_queued', 'Veo job submitted, waiting for generation...', { veo_poll: 0 });
 
-    // Poll Veo while Lyria runs concurrently
+    // Poll Veo — 10s interval, 8-minute hard timeout
+    const VEO_TIMEOUT_MS = 8 * 60 * 1000;
+    const veoStart = Date.now();
     let veoOp = veoOp0;
     let pollCount = 0;
     while (!veoOp.done) {
-      await new Promise(r => setTimeout(r, 5000));
+      if (Date.now() - veoStart > VEO_TIMEOUT_MS) {
+        throw new Error(`Veo timed out after ${Math.round((Date.now()-veoStart)/1000)}s (${pollCount} polls). Try again.`);
+      }
+      await new Promise(r => setTimeout(r, 10000));
       pollCount++;
       veoOp = await ai.operations.getVideosOperation({ operation: veoOp });
       log('veo_polling', `Veo generating... (poll #${pollCount}, ${Math.round((Date.now()-t0)/1000)}s elapsed)`, { veo_poll: pollCount });
+    }
+
+    // done=true — check for error or silent failure before proceeding
+    if (veoOp.error) {
+      throw new Error(`Veo generation failed: ${veoOp.error.message || JSON.stringify(veoOp.error)}`);
+    }
+    if (!veoOp.response?.generatedVideos?.length) {
+      throw new Error('Veo returned no video (silent failure — likely a content policy block or quota issue). Try rephrasing your scene.');
     }
     log('veo_done', `Veo finished after ${pollCount} polls (+${Date.now()-t0}ms)`);
 
