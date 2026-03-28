@@ -187,7 +187,7 @@ Transcript: "${transcript}"
 
 Respond with ONLY valid JSON in this exact shape:
 {
-  "veo_prompt": "A detailed scene description for Veo 3 video generation. Cinematic, slow-paced, hand-drawn animation style, long scene holds, calm cuts, 8 seconds.",
+  "veo_prompt": "A detailed scene description for Veo 3 video generation. Cinematic, slow-paced, hand-drawn animation style, long scene holds, calm cuts, 5 seconds.",
   "lyria_prompt": "A music generation prompt for Lyria 2. Calm gentle instrumental, slow-media pacing, children's animated show tone.",
   "characters_mentioned": ["name1", "name2"],
   "episode_title": "Short episode title"
@@ -286,7 +286,7 @@ app.post('/api/narrate', async (req, res, next) => { try {
     contents: [{ role: 'user', parts: [{ text }] }],
     config: {
       responseModalities: ['AUDIO'],
-      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Sulafat' } } }
+      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } }
     }
   });
   const part = result.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('audio'));
@@ -395,6 +395,134 @@ Respond with ONLY valid JSON: { "voice_prompt": "...", "sound_label": "a short l
   res.json(JSON.parse(result.text));
 } catch (e) { next(e); } });
 
+// ── Intro scene job ─────────────────────────────────────────────────────────
+async function runIntroJob(jobId, { show_id, char_name, character_traits, story_name }) {
+  const t0 = Date.now();
+  const TRAIT_LABELS = {
+    fears: '{n} is a little afraid of', favoriteFood: "{n}'s favorite food is",
+    favoriteAnimal: "{n}'s favorite animal is", talent: "{n}'s special talent is",
+    makesHappy: '{n} is happiest when', dreams: '{n} dreams about',
+    biggestWish: "{n}'s biggest wish is", bestFriend: "{n}'s best friend is",
+    favoriteColor: "{n}'s favorite color is", neverLeaveWithout: '{n} never leaves home without',
+    loves: '{n} loves',
+  };
+  const traitLines = Object.entries(character_traits || {})
+    .map(([k, v]) => `${(TRAIT_LABELS[k] || k).replace('{n}', char_name)}: ${v}`)
+    .join('\n');
+  const characterContext = `Main character: ${char_name}\n${traitLines}`;
+
+  try {
+    // Call A: get veo_prompt + challenge text fast
+    const result = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
+${characterContext}
+Story name: "${story_name || char_name + "'s Adventure"}"
+
+Write the OPENING SCENE that introduces this character. It should:
+- Show the character in their world doing something that reflects their personality
+- End with an unexpected situation or small problem that sets up the first challenge
+
+Then write the challenge question the child sees right after watching this intro scene. It must feel like a direct continuation ("Uh oh! [what just happened] — what should ${char_name} do?").
+
+${CHILD_VOCAB}
+
+Respond with ONLY valid JSON:
+{
+  "veo_prompt": "Vivid scene under 80 words. Hand-drawn animation style, bright colors, 6 seconds. Fade from black. Character doing something that shows their personality. Scene ends as a situation develops. Fade to black.",
+  "lyria_prompt": "Opening-of-a-story music — warm, whimsical, sense of adventure beginning",
+  "episode_title": "Fun intro title",
+  "challenge_text": "The challenge shown to the child after this intro (1-2 sentences, age-appropriate, direct continuation of the scene)",
+  "challenge_short": "5-8 word version of the challenge",
+  "visual_style": "Brief description of art style, color palette, world — used for ALL scenes in this story"
+}` }] }],
+      config: { responseMimeType: 'application/json' }
+    });
+    const introData = JSON.parse(result.text);
+
+    // Save visual style for scene continuity
+    if (introData.visual_style) {
+      sql`
+        INSERT INTO world_state (show_id, key, value, last_updated)
+        VALUES (${show_id}, 'visual_style', ${JSON.stringify(introData.visual_style)}, now())
+        ON CONFLICT (show_id, key) DO UPDATE SET value = EXCLUDED.value, last_updated = now()
+      `.catch(e => console.warn('Failed to save visual_style:', e.message));
+    }
+
+    // Expose challenge immediately so frontend can show it while Veo generates
+    jobs.set(jobId, {
+      ...jobs.get(jobId),
+      step: 'veo_queued',
+      label: 'Animating your intro scene...',
+      challenge_text: introData.challenge_text,
+      challenge_short: introData.challenge_short,
+    });
+
+    // Start Lyria + Veo in parallel
+    const lyriaPromise = ai.models.generateContent({
+      model: 'lyria-3-clip-preview',
+      contents: [{ role: 'user', parts: [{ text: introData.lyria_prompt }] }],
+      config: { responseModalities: ['AUDIO'] },
+    });
+
+    const veoOp0 = await Promise.race([
+      ai.models.generateVideos({
+        model: 'veo-3.1-fast-generate-preview',
+        prompt: introData.veo_prompt,
+        config: { aspectRatio: '16:9', durationSeconds: 6 },
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Intro Veo submit timed out')), 60_000)),
+    ]);
+
+    const VEO_TIMEOUT_MS = 8 * 60 * 1000;
+    const veoStart = Date.now();
+    let veoOp = veoOp0;
+    while (!veoOp.done) {
+      if (Date.now() - veoStart > VEO_TIMEOUT_MS) throw new Error('Intro Veo timed out');
+      await new Promise(r => setTimeout(r, 5000));
+      veoOp = await ai.operations.getVideosOperation({ operation: veoOp });
+      const cur = jobs.get(jobId);
+      jobs.set(jobId, { ...cur, label: `Animating intro... (${Math.round((Date.now() - t0) / 1000)}s)` });
+    }
+    if (veoOp.error) throw new Error(`Veo error: ${veoOp.error.message}`);
+    if (!veoOp.response?.generatedVideos?.length) throw new Error('Veo returned no video');
+
+    const videoFilename = `${show_id}-intro.mp4`;
+    await ai.files.download({ file: veoOp.response.generatedVideos[0].video, downloadPath: join(__dirname, 'public', 'generated', videoFilename) });
+
+    const lyriaRes = await lyriaPromise;
+    const audioPart = lyriaRes.candidates?.[0]?.content?.parts?.find(p => p.inlineData?.mimeType?.startsWith('audio'));
+    const audioFilename = `${show_id}-intro.mp3`;
+    if (audioPart?.inlineData?.data) {
+      writeFileSync(join(__dirname, 'public', 'generated', audioFilename), Buffer.from(audioPart.inlineData.data, 'base64'));
+    }
+
+    jobs.set(jobId, {
+      status: 'done',
+      result: {
+        video_url: `/generated/${videoFilename}`,
+        audio_url: audioPart?.inlineData?.data ? `/generated/${audioFilename}` : null,
+        challenge_text: introData.challenge_text,
+        challenge_short: introData.challenge_short,
+      },
+      started_at: t0,
+      elapsed_ms: Date.now() - t0,
+    });
+    console.log(`[intro:${jobId.slice(0, 8)}] DONE in ${Math.round((Date.now() - t0) / 1000)}s`);
+  } catch (e) {
+    console.error(`[intro:${jobId.slice(0, 8)}] ERROR:`, e.message);
+    jobs.set(jobId, { status: 'error', error: e.message, started_at: t0, elapsed_ms: Date.now() - t0 });
+  }
+}
+
+app.post('/api/generate-intro', async (req, res, next) => { try {
+  const { job_id, show_id, char_name, character_traits, story_name } = req.body;
+  if (!job_id || !show_id || !char_name) return res.status(400).json({ error: 'job_id, show_id, char_name required' });
+  jobs.set(job_id, { status: 'running', step: 'building_prompts', label: 'Writing your story opening...', started_at: Date.now() });
+  res.json({ job_id });
+  runIntroJob(job_id, { show_id, char_name, character_traits, story_name });
+} catch (e) { next(e); } });
+
 // ── Job-based scene pipeline ────────────────────────────────────────────────
 const jobs = new Map();
 // Clean up jobs older than 30 minutes to avoid memory leaks
@@ -428,6 +556,13 @@ async function runScenePipeline(jobId, params) {
   };
 
   try {
+    // #3: Kick off DB context loading immediately — runs in parallel with moderation
+    const contextPromise = Promise.all([
+      sql`SELECT name, description, styled_frame_url FROM characters WHERE show_id = ${show_id}`,
+      sql`SELECT episode_number, title, story_prompt, veo_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`,
+      sql`SELECT value FROM world_state WHERE show_id = ${show_id} AND key = 'visual_style'`
+    ]);
+
     log('moderation', 'Checking story content...');
     if (!parent_approved) {
       const modResult = await ai.models.generateContent({
@@ -444,11 +579,7 @@ async function runScenePipeline(jobId, params) {
     }
 
     log('loading_context', 'Loading story context...');
-    const [existingCharacters, prevEpisodes, visualStyleRows] = await Promise.all([
-      sql`SELECT name, description, styled_frame_url FROM characters WHERE show_id = ${show_id}`,
-      sql`SELECT episode_number, title, story_prompt, veo_prompt FROM episodes WHERE show_id = ${show_id} ORDER BY episode_number ASC`,
-      sql`SELECT value FROM world_state WHERE show_id = ${show_id} AND key = 'visual_style'`
-    ]);
+    const [existingCharacters, prevEpisodes, visualStyleRows] = await contextPromise;
     const characterContext = existingCharacters.length
       ? `Characters in this story: ${existingCharacters.map(c => `${c.name} (${c.description})`).join(', ')}.`
       : 'No characters yet.';
@@ -481,79 +612,58 @@ async function runScenePipeline(jobId, params) {
       } catch (_) { charImageBytes = null; }
     }
 
-    log('building_prompts', 'Writing scene script...');
     const challengeContext = challenge_text
       ? `The challenge the child was given: "${challenge_text}"\nThe child's creative solution: "${solution}"`
       : `The child's idea for the scene: "${solution}"`;
-
-    const curtainInstruction = `CURTAIN RULE (STRICTLY FOLLOW FOR EVERY SCENE):
-- The very FIRST frame of the animation: red velvet theatrical curtains are CLOSED, covering the entire screen. Then they smoothly open outward from the center over exactly 1 second, revealing the scene behind them.
-- The very LAST half-second: the same red velvet theatrical curtains snap shut quickly from both sides, ending frozen on closed curtains with the exact two-word text 'Scene End' (S-C-E-N-E space E-N-D) in a warm storybook font. The text must spell exactly 'Scene End'.`;
 
     const continuityInstruction = scene_number > 1 && (prevVeoContext || visualStyleContext) ? `
 VISUAL CONTINUITY (CRITICAL — this story must look like one cohesive animated film):
 ${visualStyleContext}
 ${prevVeoContext}
-You MUST write the veo_prompt so that the art style, color palette, character appearance, and world setting are IDENTICAL to the previous scenes above. Do not introduce new visual styles or settings that contradict what was already established.` : '';
+You MUST write the veo_prompt so that the art style, color palette, character appearance, and world setting are IDENTICAL to the previous scenes above.` : '';
 
     const visualStyleInstruction = scene_number === 1 ? `
-Since this is scene 1, you must also define the visual style that will be used for ALL 3 scenes. Include a "visual_style" field in your JSON with a brief description of the art style, color palette, and world setting that will be consistent across all scenes.` : '';
+Since this is scene 1, also include a "visual_style" field: a brief description of the art style, color palette, and world setting that will be consistent across all 3 scenes.` : '';
 
     const storyContextSection = story_context ? `\nThe child's story plan:\n${story_context}\n` : '';
 
-    const result = await ai.models.generateContent({
-      model: 'gemini-2.5-flash',
-      contents: [{ role: 'user', parts: [{ text: `You are a creative director for a gentle children's animated story app.
+    const sharedContext = `You are a creative director for a gentle children's animated story app.
 Story name: "${story_name || 'Our Story'}"
 ${characterContext}
 ${traitContext}
 ${storyHistory}
 ${storyContextSection}
 ${challengeContext}
+This is scene ${scene_number} of 3. The child's solution must be shown WORKING — their idea succeeds in a satisfying, fun way.
+IMPORTANT: Use the main character's name (not pronouns). Never use he/she/him/her. For unnamed characters use they/them.
+${CHILD_VOCAB}`;
 
-This is scene ${scene_number} of 3. The child's solution must be shown WORKING — their idea succeeds in a satisfying, fun way. The animation celebrates their creativity.
-
-IMPORTANT: Refer to the main character by their name throughout (e.g. "Blobby jumps over the rock" not "they jump over the rock"). Never use gendered pronouns (he/she/him/her). For unnamed supporting characters use "they/them".
-
-${CHILD_VOCAB}
+    // #2 Call A: just veo_prompt — submit to Veo as fast as possible
+    log('building_prompts', 'Writing scene visuals...');
+    const callAResult = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `${sharedContext}
 ${continuityInstruction}
-${curtainInstruction}
 ${visualStyleInstruction}
 
-Respond with ONLY valid JSON:
-{
-  "veo_prompt": "Detailed cinematic scene description for Veo 3. Richly colored hand-drawn animation style with vibrant fully-painted backgrounds, warm and slow-paced, 8 seconds. START with curtains closed then opening. Show the child's solution working triumphantly. Include the character visually. END with curtains closing and 'Scene End' text.",
-  "lyria_prompt": "Music prompt for Lyria. Warm, gentle, children's animated tone that matches the emotional beat of the solution succeeding.",
-  "episode_title": "Short fun title for this scene",
-  "story_prompt_summary": "One sentence describing what happened (for story continuity context in future scenes)",
-  "closing_line": ${scene_number >= 3 ? '"The End! What a [pick ONE vivid adjective perfectly matching the mood and events of this specific story — e.g. magical, daring, silly, heartwarming, adventurous] story!"' : 'null'}${scene_number === 1 ? ',\n  "visual_style": "Brief description of the art style, color palette, and world setting established in this scene"' : ''}
-}` }] }],
+Write ONLY the veo_prompt for this scene. Keep it vivid but concise — under 80 words. Richly colored hand-drawn animation style, warm and playful, 5 seconds. Fade in from black at the very start. Show the child's solution working. Fade to black at the very end.
+
+Respond with ONLY valid JSON: { "veo_prompt": "..."${scene_number === 1 ? ', "visual_style": "..."' : ''} }` }] }],
       config: { responseMimeType: 'application/json' }
     });
-    const prompts = JSON.parse(result.text);
+    const veoData = JSON.parse(callAResult.text);
 
-    // Scene 1: save the visual style so scenes 2+3 inherit it
-    if (scene_number === 1 && prompts.visual_style) {
+    // Save visual style (scene 1) fire-and-forget
+    if (scene_number === 1 && veoData.visual_style) {
       sql`
         INSERT INTO world_state (show_id, key, value, last_updated)
-        VALUES (${show_id}, 'visual_style', ${JSON.stringify(prompts.visual_style)}, now())
+        VALUES (${show_id}, 'visual_style', ${JSON.stringify(veoData.visual_style)}, now())
         ON CONFLICT (show_id, key) DO UPDATE SET value = EXCLUDED.value, last_updated = now()
       `.catch(e => console.warn('Failed to save visual_style:', e.message));
     }
 
-    // Start Lyria immediately — we have the prompt and don't need voice_response for music
-    log('lyria_starting', 'Starting Lyria music in background...');
-    let lyriaRes;
-    const lyriaPromise = ai.models.generateContent({
-      model: 'lyria-3-clip-preview',
-      contents: [{ role: 'user', parts: [{ text: prompts.lyria_prompt }] }],
-      config: { responseModalities: ['AUDIO'] },
-    }).then(r => { lyriaRes = r; log('lyria_done', `Lyria music ready (+${Date.now()-t0}ms)`); return r; });
-
-    // Pause here and wait for the voice moment result from the frontend.
-    // The frontend sends it via POST /api/scene-voice-response/:jobId.
-    // If the child already responded before we got here, pendingVoiceResponse is set.
-    log('awaiting_voice', 'Prompts ready — waiting for voice moment...');
+    // Voice barrier (frontend sends null immediately — resolves fast in practice)
+    log('awaiting_voice', 'Waiting for voice moment...');
     const resolvedVoice = await new Promise((resolve) => {
       const job = jobs.get(jobId);
       if (Object.prototype.hasOwnProperty.call(job, 'pendingVoiceResponse')) {
@@ -562,12 +672,12 @@ Respond with ONLY valid JSON:
         job.resolveVoice = resolve;
       }
     });
-    console.log(`[job:${jobId.slice(0,8)}] voice_response received: ${resolvedVoice ? `"${resolvedVoice}"` : 'skipped'}`);
 
     const finalVeoPrompt = resolvedVoice
-      ? `${prompts.veo_prompt} At one point the character opens their mouth and the words "${resolvedVoice}" appear in a fun speech bubble above them.`
-      : prompts.veo_prompt;
+      ? `${veoData.veo_prompt} At one point the character opens their mouth and the words "${resolvedVoice}" appear in a fun speech bubble above them.`
+      : veoData.veo_prompt;
 
+    // #2: Submit Veo immediately with just the veo_prompt
     log('starting_veo', 'Starting Veo video generation...');
     const veoSubmitTimeout = new Promise((_, reject) =>
       setTimeout(() => reject(new Error('Veo submit timed out after 60s — the API may be overloaded. Please try again.')), 60_000)
@@ -575,9 +685,8 @@ Respond with ONLY valid JSON:
     const veoParams = {
       model: 'veo-3.1-fast-generate-preview',
       prompt: finalVeoPrompt,
-      config: { aspectRatio: '16:9', durationSeconds: 8 },
+      config: { aspectRatio: '16:9', durationSeconds: 6 },
     };
-    // Pass character's styled art as reference image — anchors visual character appearance
     if (charImageBytes) {
       veoParams.image = { imageBytes: charImageBytes, mimeType: charImageMime };
     }
@@ -586,6 +695,33 @@ Respond with ONLY valid JSON:
       veoSubmitTimeout,
     ]);
     log('veo_queued', 'Veo job submitted, waiting for generation...', { veo_poll: 0 });
+
+    // #2 Call B: lyria + metadata — runs while Veo is queuing/generating
+    const callBPromise = ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: `${sharedContext}
+The animation for this scene is: "${veoData.veo_prompt}"
+
+Write the music and metadata for this scene.
+Respond with ONLY valid JSON:
+{
+  "lyria_prompt": "Music prompt for Lyria — warm, gentle, children's animated tone matching the emotional beat of the scene",
+  "episode_title": "Short fun title for this scene",
+  "story_prompt_summary": "One sentence describing what happened (for future scene context)",
+  "closing_line": ${scene_number >= 3 ? '"The End! What a [ONE vivid adjective matching this story\'s mood] story!"' : 'null'}
+}` }] }],
+      config: { responseMimeType: 'application/json' }
+    });
+
+    // Start Lyria as soon as Call B returns (still overlaps with Veo generation)
+    log('lyria_starting', 'Starting Lyria music...');
+    const metaPrompts = JSON.parse((await callBPromise).text);
+    let lyriaRes;
+    const lyriaPromise = ai.models.generateContent({
+      model: 'lyria-3-clip-preview',
+      contents: [{ role: 'user', parts: [{ text: metaPrompts.lyria_prompt }] }],
+      config: { responseModalities: ['AUDIO'] },
+    }).then(r => { lyriaRes = r; log('lyria_done', `Lyria ready (+${Date.now()-t0}ms)`); return r; });
 
     // Poll Veo — 10s interval, 8-minute hard timeout
     const VEO_TIMEOUT_MS = 8 * 60 * 1000;
@@ -596,7 +732,7 @@ Respond with ONLY valid JSON:
       if (Date.now() - veoStart > VEO_TIMEOUT_MS) {
         throw new Error(`Veo timed out after ${Math.round((Date.now()-veoStart)/1000)}s (${pollCount} polls). Try again.`);
       }
-      await new Promise(r => setTimeout(r, 10000));
+      await new Promise(r => setTimeout(r, 5000));
       pollCount++;
       veoOp = await ai.operations.getVideosOperation({ operation: veoOp });
       log('veo_polling', `Veo generating... (poll #${pollCount}, ${Math.round((Date.now()-t0)/1000)}s elapsed)`, { veo_poll: pollCount });
@@ -619,15 +755,17 @@ Respond with ONLY valid JSON:
     await ai.files.download({ file: veoOp.response.generatedVideos[0].video, downloadPath: join(__dirname, 'public', 'generated', filename) });
     const video_url = `/generated/${filename}`;
 
-    const audioPart = lyriaRes.candidates[0].content.parts.find(p => p.inlineData?.mimeType?.startsWith('audio'));
+    const audioPart = lyriaRes.candidates?.[0]?.content?.parts?.find(p => p.inlineData?.mimeType?.startsWith('audio'));
     const audioFilename = `${show_id}-scene-${scene_number}.mp3`;
-    writeFileSync(join(__dirname, 'public', 'generated', audioFilename), Buffer.from(audioPart.inlineData.data, 'base64'));
-    const audio_url = `/generated/${audioFilename}`;
+    if (audioPart?.inlineData?.data) {
+      writeFileSync(join(__dirname, 'public', 'generated', audioFilename), Buffer.from(audioPart.inlineData.data, 'base64'));
+    }
+    const audio_url = audioPart?.inlineData?.data ? `/generated/${audioFilename}` : null;
 
     log('saving_db', 'Saving to database...');
     await sql`
       INSERT INTO episodes (show_id, episode_number, title, story_prompt, veo_clip_url, lyria_track_url, veo_prompt)
-      VALUES (${show_id}, ${scene_number}, ${prompts.episode_title}, ${prompts.story_prompt_summary || solution}, ${video_url}, ${audio_url}, ${prompts.veo_prompt})
+      VALUES (${show_id}, ${scene_number}, ${metaPrompts.episode_title}, ${metaPrompts.story_prompt_summary || solution}, ${video_url}, ${audio_url}, ${veoData.veo_prompt})
       ON CONFLICT DO NOTHING
     `;
 
@@ -643,7 +781,7 @@ Respond with ONLY valid JSON:
     console.log(`[job:${jobId.slice(0,8)}] DONE in ${total_ms}ms (${Math.round(total_ms/1000)}s)`);
     jobs.set(jobId, {
       status: 'done',
-      result: { video_url, audio_url, episode_title: prompts.episode_title, next_challenge, closing_line: prompts.closing_line || null },
+      result: { video_url, audio_url, episode_title: metaPrompts.episode_title, next_challenge, closing_line: metaPrompts.closing_line || null },
       elapsed_ms: total_ms,
       started_at: t0
     });

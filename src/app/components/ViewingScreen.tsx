@@ -7,7 +7,7 @@ import { useNarration } from '../hooks/useNarration';
 
 const TOTAL_SCENES = 3;
 
-type ScreenState = 'ready' | 'challenge' | 'generating' | 'playing' | 'naming' | 'replay' | 'done';
+type ScreenState = 'ready' | 'challenge' | 'generating' | 'playing' | 'intro' | 'naming' | 'replay' | 'done';
 
 interface Challenge {
   challenge_text: string;
@@ -56,6 +56,14 @@ export function ViewingScreen() {
   const [isSubmittingChar, setIsSubmittingChar] = useState(false);
   // track pending approvals across re-renders
   const pendingApprovalRef = useRef<{ solution: string; challenge_text: string } | null>(null);
+  // pre-fetched challenge for next scene (fetched while current video plays)
+  const prefetchedChallengeRef = useRef<{ sceneNum: number; data: Challenge } | null>(null);
+
+  // Intro scene (generated during ListeningScreen)
+  const introJobId: string | null = location.state?.introJobId || null;
+  const [introVideoUrl, setIntroVideoUrl] = useState<string | null>(null);
+  const [introAudioUrl, setIntroAudioUrl] = useState<string | null>(null);
+  const introPollingRef = useRef(false);
 
   // Custom adventure path: charName + characterTraits
   // Template path: storyDetails array [setting, char, adventure, ending]
@@ -189,8 +197,52 @@ export function ViewingScreen() {
     }
   };
 
+  // If there's an intro job, poll it — expose challenge immediately, video when done
+  useEffect(() => {
+    if (!introJobId || introPollingRef.current) return;
+    introPollingRef.current = true;
+    (async () => {
+      while (true) {
+        await new Promise(r => setTimeout(r, 2000));
+        try {
+          const resp = await fetch(`/api/scene-progress/${introJobId}`);
+          const job = await resp.json();
+          // Challenge text available as soon as Gemini returns (before Veo finishes)
+          if (job.challenge_text) {
+            setChallenge({ challenge_text: job.challenge_text, challenge_short: job.challenge_short });
+          }
+          if (job.status === 'done') {
+            setIntroVideoUrl(job.result.video_url);
+            setIntroAudioUrl(job.result.audio_url);
+            setChallenge({ challenge_text: job.result.challenge_text, challenge_short: job.result.challenge_short });
+            break;
+          } else if (job.status === 'error') {
+            break; // fall back gracefully — challenge may already be set
+          }
+        } catch { break; }
+      }
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Auto-advance from 'ready' to 'challenge' once the intro challenge is ready
+  useEffect(() => {
+    if (challenge && screenState === 'ready' && introJobId) {
+      setScreenState('challenge');
+    }
+  }, [challenge, screenState, introJobId]);
+
+  // If no intro job, pre-fetch challenge 1 via the normal path
+  useEffect(() => { if (!introJobId) prefetchNextChallenge(1); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Challenge fetch ──────────────────────────────────────────────────────
   const fetchChallenge = useCallback(async (sceneNum: number) => {
+    // Use pre-fetched data instantly if available
+    if (prefetchedChallengeRef.current?.sceneNum === sceneNum) {
+      setChallenge(prefetchedChallengeRef.current.data);
+      prefetchedChallengeRef.current = null;
+      setScreenState('challenge');
+      return;
+    }
     setIsLoadingChallenge(true);
     setError(null);
     try {
@@ -214,6 +266,24 @@ export function ViewingScreen() {
     } finally {
       setIsLoadingChallenge(false);
     }
+  }, [storyName, storyContext]);
+
+  // Silently pre-fetch the next scene's challenge in the background
+  const prefetchNextChallenge = useCallback((nextSceneNum: number) => {
+    if (nextSceneNum > TOTAL_SCENES) return;
+    fetch('/api/generate-challenge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        show_id: showIdRef.current,
+        scene_number: nextSceneNum,
+        story_name: storyName,
+        story_context: storyContext,
+      }),
+    })
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (data) prefetchedChallengeRef.current = { sceneNum: nextSceneNum, data }; })
+      .catch(() => { /* silent — fetchChallenge will retry on demand */ });
   }, [storyName, storyContext]);
 
   // ── Scene generation ─────────────────────────────────────────────────────
@@ -263,7 +333,9 @@ export function ViewingScreen() {
           setAudioUrls(prev => [...prev, job.result.audio_url]);
           setEpisodeTitles(prev => [...prev, job.result.episode_title || `Scene ${currentScene}`]);
           if (job.result.closing_line) setClosingLine(job.result.closing_line);
-          setScreenState('playing');
+          // Play intro before scene 1 if we have one
+          setScreenState(currentScene === 1 && introJobId ? 'intro' : 'playing');
+          prefetchNextChallenge(currentScene + 1);
           break;
         } else if (job.status === 'error') {
           throw new Error(job.error || 'Scene generation failed');
@@ -313,7 +385,10 @@ export function ViewingScreen() {
   };
 
   const handleReplayEnded = () => {
-    if (replaySlide < videoUrls.length - 1) {
+    // replaySlide -1 = intro, 0+ = challenge scenes
+    if (replaySlide === -1) {
+      setReplaySlide(0);
+    } else if (replaySlide < videoUrls.length - 1) {
       setReplaySlide(prev => prev + 1);
     } else {
       setScreenState('done');
@@ -358,7 +433,8 @@ export function ViewingScreen() {
 
   // ── Render helpers ───────────────────────────────────────────────────────
   const storyGuideMessage = {
-    ready: "Lights, camera, action! Click to start your adventure!",
+    ready: "Your adventure is being created...",
+    intro: "Here comes the beginning of your story!",
     challenge: "Here's your challenge! What will you do?",
     generating: "The magic is happening... your scene is being made!",
     playing: "Watch your story come to life!",
@@ -489,13 +565,13 @@ export function ViewingScreen() {
             {/* Loading draw area */}
             <div className="flex-1 border-t border-purple-700 mx-4 mb-4 rounded-2xl overflow-hidden bg-black/30 flex flex-col p-3 gap-2 min-h-0">
               <p className="text-yellow-300 text-sm font-bold text-center" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
-                🎨 Draw a new character to add to your story!
+                🎨 Who does {charNameFromState || 'your character'} meet? Draw them and give them a name!
               </p>
               <div className="flex gap-2 items-center">
                 <input
                   value={loadingCharName}
                   onChange={e => setLoadingCharName(e.target.value)}
-                  placeholder="Name it..."
+                  placeholder="Character name..."
                   className="flex-1 px-3 py-1.5 rounded-xl text-sm text-gray-800 border-2 border-yellow-400 focus:outline-none"
                   style={{ fontFamily: 'Comic Sans MS, cursive' }}
                   onKeyDown={e => { if (e.key === 'Enter') handleSubmitLoadingChar(); }}
@@ -555,6 +631,38 @@ export function ViewingScreen() {
                 </div>
               )}
             </div>
+          </div>
+        );
+
+      case 'intro':
+        return (
+          <div className="size-full relative bg-black">
+            {introVideoUrl ? (
+              <>
+                <video
+                  key={introVideoUrl}
+                  src={introVideoUrl}
+                  autoPlay
+                  onEnded={() => setScreenState('playing')}
+                  className="w-full h-full object-contain"
+                />
+                {introAudioUrl && <audio key={introAudioUrl} src={introAudioUrl} autoPlay />}
+                <div className="absolute top-3 left-3 bg-black/60 rounded-full px-3 py-1">
+                  <p className="text-white text-sm" style={{ fontFamily: 'Comic Sans MS, cursive' }}>Your Story Begins...</p>
+                </div>
+              </>
+            ) : (
+              <div className="size-full flex flex-col items-center justify-center gap-4">
+                <motion.div
+                  animate={{ rotate: 360 }}
+                  transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
+                  className="w-12 h-12 border-4 border-[#FFD93D] border-t-transparent rounded-full"
+                />
+                <p className="text-white text-lg" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
+                  Finishing your intro scene...
+                </p>
+              </div>
+            )}
           </div>
         );
 
@@ -622,8 +730,9 @@ export function ViewingScreen() {
         );
 
       case 'replay': {
-        const videoUrl = videoUrls[replaySlide];
-        const audioUrl = audioUrls[replaySlide];
+        const isIntroSlide = replaySlide === -1 && !!introVideoUrl;
+        const videoUrl = isIntroSlide ? introVideoUrl! : videoUrls[Math.max(0, replaySlide)];
+        const audioUrl = isIntroSlide ? introAudioUrl : audioUrls[Math.max(0, replaySlide)];
         return (
           <div className="size-full relative bg-black">
             <video
@@ -636,7 +745,7 @@ export function ViewingScreen() {
             {audioUrl && <audio key={audioUrl} src={audioUrl} autoPlay />}
             <div className="absolute top-3 left-3 bg-black/60 rounded-full px-3 py-1">
               <p className="text-white text-sm" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
-                {episodeTitles[replaySlide] || `Scene ${replaySlide + 1}`}
+                {isIntroSlide ? 'Your Story Begins...' : (episodeTitles[replaySlide] || `Scene ${replaySlide + 1}`)}
               </p>
             </div>
             <div className="absolute bottom-4 left-8 right-8 h-2 bg-gray-800 rounded-full overflow-hidden">
@@ -675,7 +784,7 @@ export function ViewingScreen() {
                 <motion.button
                   whileHover={{ scale: 1.1 }}
                   whileTap={{ scale: 0.9 }}
-                  onClick={() => { setReplaySlide(0); setScreenState('replay'); }}
+                  onClick={() => { setReplaySlide(introVideoUrl ? -1 : 0); setScreenState('replay'); }}
                   className="bg-[#4ECDC4] text-white px-8 py-4 rounded-full text-xl font-bold shadow-xl flex items-center gap-3"
                   style={{ fontFamily: 'Comic Sans MS, cursive' }}
                 >
@@ -710,47 +819,45 @@ export function ViewingScreen() {
   };
 
   return (
-    <div className="size-full bg-white flex flex-col items-center justify-center p-8 overflow-hidden border-[24px] border-[#E63946]">
-      {/* Header */}
-      <div className="w-full max-w-6xl mb-4 flex justify-between items-center">
+    <div className="size-full bg-white flex flex-col overflow-hidden border-[12px] border-[#E63946]">
+      {/* Compact header row: Home | Simon + bubble | Gallery */}
+      <div className="flex items-center gap-3 px-4 pt-2 pb-1 flex-shrink-0 border-b border-gray-100">
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={() => navigate('/')}
-          className="bg-gray-200 text-gray-700 px-6 py-3 rounded-full font-bold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
+          className="bg-gray-200 text-gray-700 px-4 py-2 rounded-full font-bold shadow flex items-center gap-2 text-sm flex-shrink-0"
+          style={{ fontFamily: 'Comic Sans MS, cursive' }}
         >
-          <Home className="w-5 h-5" />
+          <Home className="w-4 h-4" />
           Home
         </motion.button>
 
-        <h2 className="text-3xl font-bold text-[#FF6B6B]" style={{ fontFamily: 'Comic Sans MS, cursive' }}>
-          Story Theatre! 🎬
-        </h2>
+        <div className="flex-1 flex justify-center">
+          <StoryGuide compact message={storyGuideMessage} isAnimating={true} />
+        </div>
 
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
           onClick={() => navigate('/gallery')}
-          className="bg-yellow-400 text-gray-800 px-6 py-3 rounded-full font-bold shadow-lg hover:shadow-xl transition-all flex items-center gap-2"
+          className="bg-yellow-400 text-gray-800 px-4 py-2 rounded-full font-bold shadow flex items-center gap-2 text-sm flex-shrink-0"
+          style={{ fontFamily: 'Comic Sans MS, cursive' }}
         >
-          <ImageIcon className="w-5 h-5" />
+          <ImageIcon className="w-4 h-4" />
           Gallery
         </motion.button>
       </div>
 
-      {/* Story guide */}
-      <div className="mb-4">
-        <StoryGuide message={storyGuideMessage} isAnimating={true} />
-      </div>
-
-      {/* Theatre Frame */}
+      {/* Theatre Frame — fills remaining height */}
+      <div className="flex-1 flex items-center justify-center p-3 overflow-hidden bg-gray-950">
       <motion.div
         initial={{ scale: 0.8, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ duration: 0.5, type: 'spring' }}
         className="relative"
       >
-        <div className="relative bg-gradient-to-br from-gray-900 to-gray-800 p-8 rounded-3xl shadow-2xl">
+        <div className="relative bg-gradient-to-br from-gray-900 to-gray-800 p-4 rounded-3xl shadow-2xl">
           {/* Inner gold border */}
           <div
             className="absolute inset-4 border-8 border-[#FFD700] rounded-2xl pointer-events-none"
@@ -778,6 +885,7 @@ export function ViewingScreen() {
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-[#FFD700] via-[#FFA500] to-[#FFD700]" />
         </motion.div>
       </motion.div>
+      </div>{/* end theatre flex wrapper */}
 
       {/* Parental approval overlay */}
       {approvalPending && (

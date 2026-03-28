@@ -4,9 +4,50 @@ interface StoryGuideProps {
   message?: string;
   isAnimating?: boolean;
   hideMessage?: boolean;
+  compact?: boolean;
 }
 
-export function StoryGuide({ message, isAnimating = false, hideMessage = false }: StoryGuideProps) {
+export function StoryGuide({ message, isAnimating = false, hideMessage = false, compact = false }: StoryGuideProps) {
+  if (compact) {
+    return (
+      <div className="flex items-center gap-3">
+        <motion.div
+          className="relative flex-shrink-0"
+          animate={isAnimating ? { scale: [1, 1.05, 1], rotate: [0, 2, -2, 0] } : {}}
+          transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
+        >
+          <svg width="60" height="60" viewBox="0 0 200 200" className="drop-shadow-lg">
+            <motion.path
+              d="M 100 30 Q 107 55, 115 70 Q 145 73, 175 80 Q 150 105, 140 120 Q 142 145, 150 175 Q 120 157, 100 147 Q 80 157, 50 175 Q 58 145, 60 120 Q 50 105, 25 80 Q 55 73, 85 70 Q 93 55, 100 30 Z"
+              fill="#FFD93D" stroke="#000000" strokeWidth="5" strokeLinejoin="round" strokeLinecap="round"
+              initial={{ scale: 0 }} animate={{ scale: 0.7 }} transition={{ duration: 0.5, type: 'spring' }}
+            />
+            <motion.g initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
+              <circle cx="85" cy="90" r="8" fill="#000000" />
+              <circle cx="87" cy="88" r="3" fill="#FFFFFF" />
+              <circle cx="115" cy="90" r="8" fill="#000000" />
+              <circle cx="117" cy="88" r="3" fill="#FFFFFF" />
+              <ellipse cx="70" cy="105" rx="12" ry="9" fill="#FFB6B9" opacity="0.6" />
+              <ellipse cx="130" cy="105" rx="12" ry="9" fill="#FFB6B9" opacity="0.6" />
+              <path d="M 80 110 Q 100 125 120 110" stroke="#000000" strokeWidth="4" strokeLinecap="round" fill="none" />
+            </motion.g>
+          </svg>
+        </motion.div>
+        {!hideMessage && message && (
+          <motion.div
+            initial={{ opacity: 0, x: -8 }}
+            animate={{ opacity: 1, x: 0 }}
+            className="bg-white rounded-2xl px-4 py-2 shadow-md relative"
+            style={{ maxWidth: 380 }}
+          >
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 -translate-x-2 w-0 h-0 border-t-[8px] border-b-[8px] border-r-[10px] border-t-transparent border-b-transparent border-r-white" />
+            <p className="text-sm text-gray-700" style={{ fontFamily: 'Comic Sans MS, cursive' }}>{message}</p>
+          </motion.div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col items-center gap-4">
       {/* Cute rounded jellycat-style star character */}
